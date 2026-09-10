@@ -2,7 +2,7 @@
   "$schema": "./node_modules/wrangler/config-schema.json",
   "name": "get-set-go-api",
   "main": "src/index.ts",
-  "compatibility_date": "2026-09-11",
+  "compatibility_date": "2026-09-10",
   "compatibility_flags": ["nodejs_compat"],
   "workers_dev": true,
   "browser": {
