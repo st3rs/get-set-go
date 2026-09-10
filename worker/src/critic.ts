@@ -1,47 +1,4 @@
-type CriticEnv = {
-  OPENAI_API_KEY?: string;
-  OPENAI_MODEL?: string;
-};
-
-function sleep(ms: number) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function outputText(payload: any) {
-  if (typeof payload?.output_text === 'string') return payload.output_text.trim();
-  const parts: string[] = [];
-  for (const item of payload?.output || []) {
-    for (const content of item?.content || []) {
-      if (content?.type === 'output_text' && typeof content.text === 'string') parts.push(content.text);
-    }
-  }
-  return parts.join('\n').trim();
-}
-
-async function call(env: CriticEnv, body: any) {
-  if (!env.OPENAI_API_KEY) throw new Error('OPENAI_API_KEY is not configured');
-  let last = 'Visual critic request failed';
-
-  for (let attempt = 0; attempt < 3; attempt++) {
-    const response = await fetch('https://api.openai.com/v1/responses', {
-      method: 'POST',
-      headers: {
-        authorization: `Bearer ${env.OPENAI_API_KEY}`,
-        'content-type': 'application/json',
-      },
-      body: JSON.stringify(body),
-    });
-
-    if (response.ok) return response.json();
-    const text = await response.text();
-    last = `OpenAI HTTP ${response.status}: ${text.slice(0, 700)}`;
-    if (response.status !== 429 || attempt === 2) break;
-    const retryAfter = Number(response.headers.get('retry-after') || 0);
-    await sleep(Math.min(retryAfter > 0 ? retryAfter * 1000 : 2500 * Math.pow(2, attempt), 12000));
-  }
-
-  throw new Error(last);
-}
+import { extractResponseText, responsesRequest, type AiEnv } from './ai-client';
 
 const CRITIC_SCHEMA = {
   type: 'object',
@@ -59,7 +16,7 @@ const CRITIC_SCHEMA = {
 };
 
 export async function runVisualCritic(
-  env: CriticEnv,
+  env: AiEnv,
   input: {
     target: string;
     visualSpec: any;
@@ -72,7 +29,6 @@ export async function runVisualCritic(
     generatedMobile?: string;
   },
 ) {
-  const model = env.OPENAI_MODEL || 'gpt-5.6-sol';
   const content: any[] = [
     {
       type: 'input_text',
@@ -91,8 +47,7 @@ export async function runVisualCritic(
     content.push({ type: 'input_image', image_url: input.generatedMobile, detail: 'high' });
   }
 
-  const payload = await call(env, {
-    model,
+  const response = await responsesRequest(env, 'critic', {
     reasoning: { effort: 'high' },
     input: [{ role: 'user', content }],
     text: {
@@ -106,7 +61,11 @@ export async function runVisualCritic(
     },
   });
 
-  const text = outputText(payload);
+  const text = extractResponseText(response.payload);
   if (!text) throw new Error('Visual critic returned no output');
-  return JSON.parse(text);
+  return {
+    ...JSON.parse(text),
+    provider: response.provider,
+    model: response.model,
+  };
 }
