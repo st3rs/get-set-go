@@ -1,20 +1,10 @@
 import { launch, type BrowserWorker } from '@cloudflare/playwright';
+import { buildComponentPlan, buildDesignIR, buildGeneratedPreview, type Signal } from './design';
 
 interface Env {
   BROWSER: BrowserWorker;
   FRONTEND_ORIGIN?: string;
 }
-
-type Signal = {
-  title: string;
-  url: string;
-  viewport: { width: number; height: number };
-  page: { width: number; height: number };
-  visibleElementCount: number;
-  tokens: Record<string, Array<{ value: string; count: number }>>;
-  headings: Array<any>;
-  landmarks: Array<any>;
-};
 
 const VIEWPORTS = {
   desktop: { width: 1440, height: 900 },
@@ -141,110 +131,11 @@ async function extractSignals(page: any): Promise<Signal> {
   });
 }
 
-function firstValues(list: Array<{ value: string; count: number }> = [], max = 8) {
-  return list.slice(0, max).map((x) => x.value);
-}
-
-function inferSiteType(signal: Signal) {
-  const title = signal.title.toLowerCase();
-  const headingText = signal.headings.map((h) => String(h.text || '')).join(' ').toLowerCase();
-  const text = `${title} ${headingText}`;
-  if (/shop|store|cart|checkout|product/.test(text)) return 'commerce';
-  if (/dashboard|analytics|workspace|admin/.test(text)) return 'dashboard';
-  if (/blog|news|article|stories/.test(text)) return 'content';
-  if (/pricing|product|platform|software|system|developer|team/.test(text)) return 'saas';
-  return 'landing';
-}
-
-function buildRegions(signal: Signal) {
-  const seen = new Set<string>();
-  return signal.landmarks
-    .filter((x) => x.box.width > 0 && x.box.height > 0)
-    .map((x, index) => {
-      const raw = x.ariaLabel || x.id || x.classHint || `${x.tag}-${index + 1}`;
-      const id = String(raw).replace(/[^a-zA-Z0-9_-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 48) || `${x.tag}-${index + 1}`;
-      const unique = seen.has(id) ? `${id}-${index + 1}` : id;
-      seen.add(unique);
-      return { id: unique, type: x.tag, box: x.box };
-    })
-    .slice(0, 32);
-}
-
-function buildDesignIR(breakpoints: Record<string, Signal>) {
-  const desktop = breakpoints.desktop;
-  const tablet = breakpoints.tablet;
-  const mobile = breakpoints.mobile;
-  const regions = buildRegions(desktop);
-  const regionTypes = [...new Set(regions.map((r) => r.type))];
-  const components = [
-    regionTypes.includes('nav') ? 'Navigation' : null,
-    regionTypes.includes('header') ? 'Header' : null,
-    desktop.headings.some((h) => h.tag === 'H1') ? 'HeroOrPrimaryHeading' : null,
-    regionTypes.includes('section') ? 'SectionGroup' : null,
-    regionTypes.includes('aside') ? 'Aside' : null,
-    regionTypes.includes('footer') ? 'Footer' : null,
-  ].filter(Boolean);
-
-  const desktopWidth = desktop.viewport.width || 1;
-  const contentBoxes = regions.filter((r) => r.type === 'main' || r.type === 'section');
-  const widest = contentBoxes.reduce((max, r) => Math.max(max, r.box.width), 0);
-  const maxContentWidth = widest > 0 ? widest : desktop.page.width;
-
-  const mobileStructuralDelta = Math.abs((desktop.landmarks?.length || 0) - (mobile.landmarks?.length || 0));
-  const tabletStructuralDelta = Math.abs((desktop.landmarks?.length || 0) - (tablet.landmarks?.length || 0));
-
-  return {
-    version: '0.2.0',
-    generatedBy: 'deterministic-browser-analysis',
-    siteType: inferSiteType(desktop),
-    layout: {
-      viewportWidth: desktopWidth,
-      pageHeight: desktop.page.height,
-      maxContentWidth,
-      maxContentRatio: Number((maxContentWidth / desktopWidth).toFixed(3)),
-      regionCount: regions.length,
-      density: desktop.visibleElementCount > 3000 ? 'high' : desktop.visibleElementCount > 1200 ? 'medium' : 'low',
-    },
-    tokens: {
-      fontFamilies: firstValues(desktop.tokens.fonts, 6),
-      fontSizes: firstValues(desktop.tokens.fontSizes, 10),
-      fontWeights: firstValues(desktop.tokens.fontWeights, 8),
-      textColors: firstValues(desktop.tokens.textColors, 10),
-      backgrounds: firstValues(desktop.tokens.backgrounds, 10),
-      radii: firstValues(desktop.tokens.radii, 8),
-      gaps: firstValues(desktop.tokens.gaps, 8),
-    },
-    typography: {
-      headings: desktop.headings.slice(0, 12).map((h) => ({
-        level: h.tag,
-        text: h.text,
-        fontSize: h.fontSize,
-        fontWeight: h.fontWeight,
-        lineHeight: h.lineHeight,
-        box: h.box,
-      })),
-    },
-    regions,
-    components,
-    responsive: {
-      desktop: { viewport: desktop.viewport, page: desktop.page, visibleElements: desktop.visibleElementCount },
-      tablet: { viewport: tablet.viewport, page: tablet.page, visibleElements: tablet.visibleElementCount, structuralDelta: tabletStructuralDelta },
-      mobile: { viewport: mobile.viewport, page: mobile.page, visibleElements: mobile.visibleElementCount, structuralDelta: mobileStructuralDelta },
-      likelyResponsiveReflow: mobile.page.height !== desktop.page.height || mobileStructuralDelta > 0,
-    },
-    uncertainty: [
-      'No visual-model interpretation used',
-      'Interactive states, animation timing, pseudo-elements and canvas/WebGL visuals are not semantically interpreted yet',
-      'Component names are inferred from structural HTML landmarks, not source framework components',
-    ],
-  };
-}
-
 async function analyze(target: string, env: Env) {
   const browser = await launch(env.BROWSER);
   try {
     const context = await browser.newContext({
-      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/142 Safari/537.36 GetSetGo/0.2',
+      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/142 Safari/537.36 GetSetGo/0.3',
     });
     const page = await context.newPage();
     const breakpoints: Record<string, Signal> = {};
@@ -257,14 +148,18 @@ async function analyze(target: string, env: Env) {
     }
 
     const designIR = buildDesignIR(breakpoints);
+    const componentPlan = buildComponentPlan(designIR, breakpoints.desktop);
+    const generatedPreview = buildGeneratedPreview(designIR, componentPlan, breakpoints.desktop);
 
     return {
-      version: '0.2.0',
+      version: '0.3.0',
       target,
       generatedAt: new Date().toISOString(),
       policy: { vision: 'off-by-default', rawDomReturned: false, screenshotEmbedded: false, aiCalls: 0 },
       breakpoints,
       designIR,
+      componentPlan,
+      generatedPreview,
     };
   } finally {
     await browser.close();
@@ -274,19 +169,22 @@ async function analyze(target: string, env: Env) {
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors(env) });
-
     const reqUrl = new URL(request.url);
 
     if (reqUrl.pathname === '/health') {
-      return json(env, { ok: true, service: 'get-set-go-api', browser: 'cloudflare-browser-run', designIR: 'deterministic-v0.2' });
+      return json(env, {
+        ok: true,
+        service: 'get-set-go-api',
+        browser: 'cloudflare-browser-run',
+        pipeline: 'design-ir + component-plan + deterministic-preview v0.3',
+      });
     }
 
     if (reqUrl.pathname === '/analyze' && request.method === 'POST') {
       try {
         const body = await request.json() as { url?: unknown };
         const target = normalizeTarget(body.url);
-        const result = await analyze(target, env);
-        return json(env, result);
+        return json(env, await analyze(target, env));
       } catch (error) {
         const message = error instanceof Error ? error.message : 'Analysis failed';
         return json(env, { ok: false, error: message }, 400);
