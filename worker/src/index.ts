@@ -199,7 +199,7 @@ async function analyze(target: string, env: Env, qualityRequested: boolean) {
   const browser = await launch(env.BROWSER);
   try {
     const context = await browser.newContext({
-      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/142 Safari/537.36 GetSetGo/0.6',
+      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/142 Safari/537.36 GetSetGo/0.7',
     });
     const page = await context.newPage();
     const breakpoints: Record<string, Signal> = {};
@@ -256,7 +256,7 @@ async function analyze(target: string, env: Env, qualityRequested: boolean) {
               generatedMobile: originalMobile ? rendered.mobile : undefined,
             });
 
-            quality.aiCalls = 3;
+            quality.aiCalls = (quality.aiCalls || 0) + 1;
             quality.models = { ...(quality.models || {}), critic: critic.model };
             quality.generated = {
               ...quality.generated,
@@ -276,7 +276,7 @@ async function analyze(target: string, env: Env, qualityRequested: boolean) {
 
     const generatedPreview = quality?.generated?.previewHtml
       ? {
-          version: '0.6.0',
+          version: '0.7.0',
           mode: critic ? 'ai-critic-corrected-preview' : 'ai-quality-preview',
           html: quality.generated.previewHtml,
           sandboxRecommended: true,
@@ -288,7 +288,7 @@ async function analyze(target: string, env: Env, qualityRequested: boolean) {
     const selected = configured ? selectAi(env, 'architect') : null;
 
     return {
-      version: '0.6.0',
+      version: '0.7.0',
       target,
       generatedAt: new Date().toISOString(),
       policy: {
@@ -299,6 +299,8 @@ async function analyze(target: string, env: Env, qualityRequested: boolean) {
         provider: quality?.provider || selected?.provider || null,
         model: quality?.model || selected?.model || null,
         models: quality?.models || null,
+        imageModel: env.MODEL_API_KEY ? (env.MUSE_IMAGE_MODEL || 'muse-image-1.0') : null,
+        imageAssetsGenerated: quality?.assets?.length || 0,
         qualityGate: critic ? 'visual-critic-complete' : quality ? 'visual-critic-unavailable' : 'not-run',
         rawDomReturned: false,
         screenshotEmbeddedInResponse: false,
@@ -308,6 +310,8 @@ async function analyze(target: string, env: Env, qualityRequested: boolean) {
       componentPlan,
       generatedPreview,
       visualSpec: quality?.visualSpec || null,
+      generatedAssets: quality?.assets || [],
+      assetErrors: quality?.assetErrors || [],
       generatedFiles: quality?.generated ? {
         appTsx: quality.generated.appTsx,
         stylesCss: quality.generated.stylesCss,
@@ -341,10 +345,11 @@ export default {
         ok: true,
         service: 'get-set-go-api',
         browser: 'cloudflare-browser-run',
-        pipeline: 'free-first quality-gated visual architect v0.6',
+        pipeline: 'Muse quality pipeline + conditional Muse Image + visual critic v0.7',
         aiConfigured: configured,
         provider: selected?.provider || null,
         model: selected?.model || null,
+        imageModel: env.MODEL_API_KEY ? (env.MUSE_IMAGE_MODEL || 'muse-image-1.0') : null,
       });
     }
 
