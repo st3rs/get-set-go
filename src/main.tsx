@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react'
+import React, { useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import './styles.css'
 
@@ -10,18 +10,11 @@ type Analysis = {
   error?: string
 }
 
-const DEFAULT_API_BASE = 'https://get-set-go-api.pdflow6223.workers.dev'
-
 function App() {
   const [url, setUrl] = useState('')
   const [status, setStatus] = useState('Ready for a reference')
   const [busy, setBusy] = useState(false)
   const [result, setResult] = useState<Analysis | null>(null)
-
-  const apiBase = useMemo(() => {
-    const env = (import.meta as any).env || {}
-    return String(env.VITE_API_BASE_URL || DEFAULT_API_BASE).replace(/\/$/, '')
-  }, [])
 
   async function submit(e: React.FormEvent) {
     e.preventDefault()
@@ -38,7 +31,7 @@ function App() {
     setStatus('Cloud browser is analyzing the reference…')
 
     try {
-      const response = await fetch(`${apiBase}/analyze`, {
+      const response = await fetch('/api/analyze', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ url }),
