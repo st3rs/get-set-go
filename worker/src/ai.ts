@@ -1,56 +1,10 @@
-type OpenAIEnv = {
-  OPENAI_API_KEY?: string;
-  OPENAI_MODEL?: string;
-};
+import { extractResponseText, responsesRequest, type AiEnv } from './ai-client';
 
 type ImageEvidence = {
   label: string;
   dataUrl: string;
   detail?: 'low' | 'high' | 'auto';
 };
-
-function sleep(ms: number) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function extractOutputText(payload: any) {
-  if (typeof payload?.output_text === 'string' && payload.output_text.trim()) return payload.output_text.trim();
-  const parts: string[] = [];
-  for (const item of payload?.output || []) {
-    for (const content of item?.content || []) {
-      if (content?.type === 'output_text' && typeof content.text === 'string') parts.push(content.text);
-    }
-  }
-  return parts.join('\n').trim();
-}
-
-async function responsesCall(env: OpenAIEnv, body: any, retries = 2) {
-  if (!env.OPENAI_API_KEY) throw new Error('OPENAI_API_KEY is not configured');
-
-  let lastError = 'OpenAI request failed';
-  for (let attempt = 0; attempt <= retries; attempt++) {
-    const response = await fetch('https://api.openai.com/v1/responses', {
-      method: 'POST',
-      headers: {
-        authorization: `Bearer ${env.OPENAI_API_KEY}`,
-        'content-type': 'application/json',
-      },
-      body: JSON.stringify(body),
-    });
-
-    if (response.ok) return response.json();
-
-    const text = await response.text();
-    lastError = `OpenAI HTTP ${response.status}: ${text.slice(0, 700)}`;
-
-    if (response.status !== 429 || attempt === retries) break;
-    const retryAfter = Number(response.headers.get('retry-after') || 0);
-    const waitMs = retryAfter > 0 ? retryAfter * 1000 : 2500 * Math.pow(2, attempt);
-    await sleep(Math.min(waitMs, 12000));
-  }
-
-  throw new Error(lastError);
-}
 
 const ARCHITECT_SCHEMA = {
   type: 'object',
@@ -88,7 +42,7 @@ function compactJson(value: unknown, maxChars = 24000) {
 }
 
 export async function runQualityPipeline(
-  env: OpenAIEnv,
+  env: AiEnv,
   input: {
     target: string;
     designIR: any;
@@ -97,8 +51,6 @@ export async function runQualityPipeline(
     images: ImageEvidence[];
   },
 ) {
-  const model = env.OPENAI_MODEL || 'gpt-5.6-sol';
-
   const architectContent: any[] = [
     {
       type: 'input_text',
@@ -111,8 +63,7 @@ export async function runQualityPipeline(
     architectContent.push({ type: 'input_image', image_url: image.dataUrl, detail: image.detail || 'high' });
   }
 
-  const architectPayload = await responsesCall(env, {
-    model,
+  const architectResponse = await responsesRequest(env, 'architect', {
     reasoning: { effort: 'high' },
     input: [{ role: 'user', content: architectContent }],
     text: {
@@ -126,7 +77,7 @@ export async function runQualityPipeline(
     },
   });
 
-  const architectText = extractOutputText(architectPayload);
+  const architectText = extractResponseText(architectResponse.payload);
   if (!architectText) throw new Error('Visual architect returned no output');
   const visualSpec = JSON.parse(architectText);
 
@@ -142,8 +93,7 @@ export async function runQualityPipeline(
     codegenContent.push({ type: 'input_image', image_url: image.dataUrl, detail: image.detail || 'high' });
   }
 
-  const codegenPayload = await responsesCall(env, {
-    model,
+  const codegenResponse = await responsesRequest(env, 'codegen', {
     reasoning: { effort: 'high' },
     input: [{ role: 'user', content: codegenContent }],
     text: {
@@ -157,13 +107,18 @@ export async function runQualityPipeline(
     },
   });
 
-  const codegenText = extractOutputText(codegenPayload);
+  const codegenText = extractResponseText(codegenResponse.payload);
   if (!codegenText) throw new Error('Code generation returned no output');
   const generated = JSON.parse(codegenText);
 
   return {
     mode: 'quality-first',
-    model,
+    provider: architectResponse.provider,
+    model: codegenResponse.model,
+    models: {
+      architect: architectResponse.model,
+      codegen: codegenResponse.model,
+    },
     aiCalls: 2,
     visualSpec,
     generated,
