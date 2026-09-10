@@ -1,6 +1,9 @@
 export type AiRole = 'architect' | 'codegen' | 'critic';
 
 export type AiEnv = {
+  MODEL_API_KEY?: string;
+  MUSE_SPARK_MODEL?: string;
+  MUSE_IMAGE_MODEL?: string;
   OPENROUTER_API_KEY?: string;
   OPENROUTER_MODEL?: string;
   OPENROUTER_CODE_MODEL?: string;
@@ -9,7 +12,7 @@ export type AiEnv = {
 };
 
 export type AiSelection = {
-  provider: 'openrouter' | 'openai';
+  provider: 'meta' | 'openrouter' | 'openai';
   model: string;
 };
 
@@ -18,10 +21,17 @@ function sleep(ms: number) {
 }
 
 export function aiConfigured(env: AiEnv) {
-  return Boolean(env.OPENROUTER_API_KEY || env.OPENAI_API_KEY);
+  return Boolean(env.MODEL_API_KEY || env.OPENROUTER_API_KEY || env.OPENAI_API_KEY);
 }
 
 export function selectAi(env: AiEnv, role: AiRole): AiSelection {
+  if (env.MODEL_API_KEY) {
+    return {
+      provider: 'meta',
+      model: env.MUSE_SPARK_MODEL || 'muse-spark-1.3',
+    };
+  }
+
   if (env.OPENROUTER_API_KEY) {
     return {
       provider: 'openrouter',
@@ -39,15 +49,21 @@ export function selectAi(env: AiEnv, role: AiRole): AiSelection {
     };
   }
 
-  throw new Error('No AI provider is configured. Add OPENROUTER_API_KEY or OPENAI_API_KEY.');
+  throw new Error('No AI provider is configured. Add MODEL_API_KEY, OPENROUTER_API_KEY, or OPENAI_API_KEY.');
 }
 
 export async function responsesRequest(env: AiEnv, role: AiRole, body: any, retries = 2) {
   const selected = selectAi(env, role);
-  const endpoint = selected.provider === 'openrouter'
-    ? 'https://openrouter.ai/api/v1/responses'
-    : 'https://api.openai.com/v1/responses';
-  const apiKey = selected.provider === 'openrouter' ? env.OPENROUTER_API_KEY : env.OPENAI_API_KEY;
+  const endpoint = selected.provider === 'meta'
+    ? 'https://api.meta.ai/v1/responses'
+    : selected.provider === 'openrouter'
+      ? 'https://openrouter.ai/api/v1/responses'
+      : 'https://api.openai.com/v1/responses';
+  const apiKey = selected.provider === 'meta'
+    ? env.MODEL_API_KEY
+    : selected.provider === 'openrouter'
+      ? env.OPENROUTER_API_KEY
+      : env.OPENAI_API_KEY;
 
   let lastError = `${selected.provider} request failed`;
 
@@ -67,9 +83,9 @@ export async function responsesRequest(env: AiEnv, role: AiRole, body: any, retr
       model: selected.model,
     };
 
-    // OpenRouter's Responses API is OpenAI-compatible, but provider models may
-    // ignore model-specific verbosity controls. Keep the portable JSON schema.
-    if (selected.provider === 'openrouter' && payload.text?.verbosity) {
+    // Keep the request portable across OpenAI-compatible providers. Meta and
+    // OpenRouter support the Responses API but do not need OpenAI verbosity.
+    if (selected.provider !== 'openai' && payload.text?.verbosity) {
       payload.text = { ...payload.text };
       delete payload.text.verbosity;
     }
@@ -100,6 +116,37 @@ export async function responsesRequest(env: AiEnv, role: AiRole, body: any, retr
   throw new Error(lastError);
 }
 
+export async function museImageRequest(env: AiEnv, body: any, retries = 2) {
+  if (!env.MODEL_API_KEY) throw new Error('MODEL_API_KEY is required for Muse Image');
+
+  const model = env.MUSE_IMAGE_MODEL || 'muse-image-1.0';
+  let lastError = `meta ${model} request failed`;
+
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    const response = await fetch('https://api.meta.ai/v1/responses', {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${env.MODEL_API_KEY}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ ...body, model }),
+    });
+
+    if (response.ok) {
+      return { payload: await response.json(), provider: 'meta' as const, model };
+    }
+
+    const text = await response.text();
+    lastError = `meta ${model} HTTP ${response.status}: ${text.slice(0, 700)}`;
+    if (response.status !== 429 || attempt === retries) break;
+    const retryAfter = Number(response.headers.get('retry-after') || 0);
+    const waitMs = retryAfter > 0 ? retryAfter * 1000 : 2500 * Math.pow(2, attempt);
+    await sleep(Math.min(waitMs, 12000));
+  }
+
+  throw new Error(lastError);
+}
+
 export function extractResponseText(payload: any) {
   if (typeof payload?.output_text === 'string' && payload.output_text.trim()) return payload.output_text.trim();
   const parts: string[] = [];
@@ -109,4 +156,14 @@ export function extractResponseText(payload: any) {
     }
   }
   return parts.join('\n').trim();
+}
+
+export function extractMuseImageBase64(payload: any) {
+  for (const item of payload?.output || []) {
+    if (item?.type === 'image_generation_call' && typeof item.result === 'string') return item.result;
+    for (const content of item?.content || []) {
+      if (content?.type === 'image_generation_call' && typeof content.result === 'string') return content.result;
+    }
+  }
+  return null;
 }
