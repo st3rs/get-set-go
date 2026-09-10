@@ -8,6 +8,7 @@ type Analysis = {
   policy?: Record<string, unknown>
   breakpoints?: Record<string, any>
   error?: string
+  action?: string
 }
 
 function App() {
@@ -36,8 +37,22 @@ function App() {
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ url }),
       })
-      const data = await response.json() as Analysis
-      if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`)
+
+      const contentType = response.headers.get('content-type') || ''
+      const text = await response.text()
+
+      if (!contentType.includes('application/json')) {
+        throw new Error(`API route returned ${contentType || 'non-JSON'} (HTTP ${response.status}). Redeploy Pages and verify the BROWSER_API service binding.`)
+      }
+
+      let data: Analysis
+      try {
+        data = JSON.parse(text) as Analysis
+      } catch {
+        throw new Error(`API returned invalid JSON (HTTP ${response.status}).`)
+      }
+
+      if (!response.ok) throw new Error(data.action ? `${data.error} ${data.action}` : data.error || `HTTP ${response.status}`)
       setResult(data)
       setStatus('Analysis complete')
     } catch (error) {
