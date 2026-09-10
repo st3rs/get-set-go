@@ -10,6 +10,8 @@ type Analysis = {
   error?: string
 }
 
+const DEFAULT_API_BASE = 'https://get-set-go-api.pdflow6223.workers.dev'
+
 function App() {
   const [url, setUrl] = useState('')
   const [status, setStatus] = useState('Ready for a reference')
@@ -18,7 +20,7 @@ function App() {
 
   const apiBase = useMemo(() => {
     const env = (import.meta as any).env || {}
-    return String(env.VITE_API_BASE_URL || '').replace(/\/$/, '')
+    return String(env.VITE_API_BASE_URL || DEFAULT_API_BASE).replace(/\/$/, '')
   }, [])
 
   async function submit(e: React.FormEvent) {
@@ -29,11 +31,6 @@ function App() {
       new URL(url)
     } catch {
       setStatus('Enter a valid public URL.')
-      return
-    }
-
-    if (!apiBase) {
-      setStatus('Frontend is live. Browser API is not connected yet.')
       return
     }
 
