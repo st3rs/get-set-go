@@ -1,13 +1,12 @@
 import { launch, type BrowserWorker } from '@cloudflare/playwright';
+import { aiConfigured, selectAi, type AiEnv } from './ai-client';
 import { runQualityPipeline } from './ai';
 import { runVisualCritic } from './critic';
 import { buildComponentPlan, buildDesignIR, buildGeneratedPreview, type Signal } from './design';
 
-interface Env {
+interface Env extends AiEnv {
   BROWSER: BrowserWorker;
   FRONTEND_ORIGIN?: string;
-  OPENAI_API_KEY?: string;
-  OPENAI_MODEL?: string;
 }
 
 const VIEWPORTS = {
@@ -200,11 +199,12 @@ async function analyze(target: string, env: Env, qualityRequested: boolean) {
   const browser = await launch(env.BROWSER);
   try {
     const context = await browser.newContext({
-      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/142 Safari/537.36 GetSetGo/0.5',
+      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/142 Safari/537.36 GetSetGo/0.6',
     });
     const page = await context.newPage();
     const breakpoints: Record<string, Signal> = {};
     const images: Array<{ label: string; dataUrl: string; detail: 'high' | 'auto' }> = [];
+    const configured = aiConfigured(env);
 
     for (const [name, viewport] of Object.entries(VIEWPORTS)) {
       await page.setViewportSize(viewport);
@@ -212,7 +212,7 @@ async function analyze(target: string, env: Env, qualityRequested: boolean) {
       await page.waitForTimeout(700);
       const signal = await extractSignals(page);
       breakpoints[name] = signal;
-      if (qualityRequested && env.OPENAI_API_KEY) images.push(...await captureVisualEvidence(page, name, signal));
+      if (qualityRequested && configured) images.push(...await captureVisualEvidence(page, name, signal));
     }
 
     const designIR = buildDesignIR(breakpoints);
@@ -224,7 +224,7 @@ async function analyze(target: string, env: Env, qualityRequested: boolean) {
     let criticError: string | null = null;
     let critic: any = null;
 
-    if (qualityRequested && env.OPENAI_API_KEY) {
+    if (qualityRequested && configured) {
       try {
         quality = await runQualityPipeline(env, {
           target,
@@ -257,6 +257,7 @@ async function analyze(target: string, env: Env, qualityRequested: boolean) {
             });
 
             quality.aiCalls = 3;
+            quality.models = { ...(quality.models || {}), critic: critic.model };
             quality.generated = {
               ...quality.generated,
               appTsx: critic.revisedAppTsx,
@@ -275,7 +276,7 @@ async function analyze(target: string, env: Env, qualityRequested: boolean) {
 
     const generatedPreview = quality?.generated?.previewHtml
       ? {
-          version: '0.5.0',
+          version: '0.6.0',
           mode: critic ? 'ai-critic-corrected-preview' : 'ai-quality-preview',
           html: quality.generated.previewHtml,
           sandboxRecommended: true,
@@ -284,16 +285,20 @@ async function analyze(target: string, env: Env, qualityRequested: boolean) {
         }
       : deterministicPreview;
 
+    const selected = configured ? selectAi(env, 'architect') : null;
+
     return {
-      version: '0.5.0',
+      version: '0.6.0',
       target,
       generatedAt: new Date().toISOString(),
       policy: {
         qualityRequested,
         qualityMode: quality ? 'ai-quality-first' : 'deterministic-fallback',
-        aiConfigured: Boolean(env.OPENAI_API_KEY),
+        aiConfigured: configured,
         aiCalls: quality?.aiCalls || 0,
-        model: quality?.model || (env.OPENAI_MODEL || 'gpt-5.6-sol'),
+        provider: quality?.provider || selected?.provider || null,
+        model: quality?.model || selected?.model || null,
+        models: quality?.models || null,
         qualityGate: critic ? 'visual-critic-complete' : quality ? 'visual-critic-unavailable' : 'not-run',
         rawDomReturned: false,
         screenshotEmbeddedInResponse: false,
@@ -312,6 +317,8 @@ async function analyze(target: string, env: Env, qualityRequested: boolean) {
         verdict: critic.verdict,
         issues: critic.issues,
         notes: critic.notes,
+        provider: critic.provider,
+        model: critic.model,
       } : null,
       qualityNotes: quality?.generated?.qualityNotes || [],
       qualityError,
@@ -328,13 +335,16 @@ export default {
     const reqUrl = new URL(request.url);
 
     if (reqUrl.pathname === '/health') {
+      const configured = aiConfigured(env);
+      const selected = configured ? selectAi(env, 'architect') : null;
       return json(env, {
         ok: true,
         service: 'get-set-go-api',
         browser: 'cloudflare-browser-run',
-        pipeline: 'quality-first + render-compare-correct v0.5',
-        aiConfigured: Boolean(env.OPENAI_API_KEY),
-        model: env.OPENAI_MODEL || 'gpt-5.6-sol',
+        pipeline: 'free-first quality-gated visual architect v0.6',
+        aiConfigured: configured,
+        provider: selected?.provider || null,
+        model: selected?.model || null,
       });
     }
 
