@@ -3,6 +3,7 @@ import { aiConfigured, selectAi, type AiEnv } from './ai-client';
 import { runQualityPipeline } from './ai';
 import { runVisualCritic } from './critic';
 import { buildComponentPlan, buildDesignIR, buildGeneratedPreview, type Signal } from './design';
+import { extractRichSignals } from './evidence';
 
 interface Env extends AiEnv {
   BROWSER: BrowserWorker;
@@ -14,6 +15,9 @@ const VIEWPORTS = {
   tablet: { width: 768, height: 1024 },
   mobile: { width: 390, height: 844 },
 } as const;
+
+const MAX_CRITIC_PASSES = 3;
+const QUALITY_THRESHOLD = 92;
 
 function cors(env: Env) {
   return {
@@ -60,93 +64,9 @@ function bytesToBase64(bytes: Uint8Array) {
 }
 
 async function screenshotDataUrl(page: any) {
-  const shot = await page.screenshot({ type: 'jpeg', quality: 78, fullPage: false, animations: 'disabled' });
+  const shot = await page.screenshot({ type: 'jpeg', quality: 82, fullPage: false, animations: 'disabled' });
   const bytes = shot instanceof Uint8Array ? shot : new Uint8Array(shot);
   return `data:image/jpeg;base64,${bytesToBase64(bytes)}`;
-}
-
-async function extractSignals(page: any): Promise<Signal> {
-  return page.evaluate(() => {
-    const all = Array.from(document.querySelectorAll('body *')) as HTMLElement[];
-    const visible = all.filter((el) => {
-      const r = el.getBoundingClientRect();
-      const s = getComputedStyle(el);
-      return r.width > 0 && r.height > 0 && s.display !== 'none' && s.visibility !== 'hidden';
-    });
-
-    const top = (values: string[], limit = 10) => {
-      const counts = new Map<string, number>();
-      for (const raw of values) {
-        const value = String(raw || '').trim();
-        if (!value || value === 'transparent' || value === 'rgba(0, 0, 0, 0)' || value === '0px') continue;
-        counts.set(value, (counts.get(value) || 0) + 1);
-      }
-      return [...counts.entries()]
-        .sort((a, b) => b[1] - a[1])
-        .slice(0, limit)
-        .map(([value, count]) => ({ value, count }));
-    };
-
-    const sample = visible.slice(0, 900).map((el) => {
-      const s = getComputedStyle(el);
-      return {
-        fontFamily: s.fontFamily,
-        fontSize: s.fontSize,
-        fontWeight: s.fontWeight,
-        color: s.color,
-        backgroundColor: s.backgroundColor,
-        borderRadius: s.borderRadius,
-        gap: s.gap,
-      };
-    });
-
-    const headings = Array.from(document.querySelectorAll('h1,h2,h3')).slice(0, 36).map((el) => {
-      const node = el as HTMLElement;
-      const r = node.getBoundingClientRect();
-      const s = getComputedStyle(node);
-      return {
-        tag: node.tagName,
-        text: (node.innerText || '').trim().slice(0, 220),
-        box: { x: Math.round(r.x), y: Math.round(r.y), width: Math.round(r.width), height: Math.round(r.height) },
-        fontSize: s.fontSize,
-        fontWeight: s.fontWeight,
-        lineHeight: s.lineHeight,
-      };
-    });
-
-    const landmarks = Array.from(document.querySelectorAll('header,nav,main,section,aside,footer'))
-      .slice(0, 120)
-      .map((el) => {
-        const node = el as HTMLElement;
-        const r = node.getBoundingClientRect();
-        return {
-          tag: node.tagName.toLowerCase(),
-          ariaLabel: node.getAttribute('aria-label'),
-          id: node.id || null,
-          classHint: String(node.className || '').slice(0, 120),
-          box: { x: Math.round(r.x), y: Math.round(r.y), width: Math.round(r.width), height: Math.round(r.height) },
-        };
-      });
-
-    return {
-      title: document.title,
-      url: location.href,
-      viewport: { width: innerWidth, height: innerHeight },
-      page: { width: document.documentElement.scrollWidth, height: document.documentElement.scrollHeight },
-      visibleElementCount: visible.length,
-      tokens: {
-        fonts: top(sample.map((x) => x.fontFamily), 8),
-        fontSizes: top(sample.map((x) => x.fontSize), 14),
-        fontWeights: top(sample.map((x) => x.fontWeight), 10),
-        textColors: top(sample.map((x) => x.color), 14),
-        backgrounds: top(sample.map((x) => x.backgroundColor), 14),
-        radii: top(sample.map((x) => x.borderRadius), 12),
-        gaps: top(sample.map((x) => x.gap), 12),
-      },
-      headings,
-      landmarks,
-    };
-  });
 }
 
 async function captureVisualEvidence(page: any, name: string, signal: Signal) {
@@ -154,22 +74,22 @@ async function captureVisualEvidence(page: any, name: string, signal: Signal) {
   if (name !== 'desktop' && name !== 'mobile') return images;
 
   await page.evaluate(() => window.scrollTo(0, 0));
-  await page.waitForTimeout(120);
+  await page.waitForTimeout(160);
   images.push({ label: `${name} top viewport`, dataUrl: await screenshotDataUrl(page), detail: 'high' });
 
   const maxScroll = Math.max(0, signal.page.height - signal.viewport.height);
-  if (maxScroll > signal.viewport.height * 1.4) {
+  if (maxScroll > signal.viewport.height * 1.15) {
     const middle = Math.round(maxScroll * 0.48);
     await page.evaluate((y: number) => window.scrollTo(0, y), middle);
-    await page.waitForTimeout(120);
+    await page.waitForTimeout(160);
     images.push({ label: `${name} middle viewport`, dataUrl: await screenshotDataUrl(page), detail: name === 'desktop' ? 'high' : 'auto' });
   }
 
-  if (name === 'desktop' && maxScroll > signal.viewport.height * 3) {
+  if (name === 'desktop' && maxScroll > signal.viewport.height * 2.2) {
     const lower = Math.round(maxScroll * 0.88);
     await page.evaluate((y: number) => window.scrollTo(0, y), lower);
-    await page.waitForTimeout(120);
-    images.push({ label: 'desktop lower viewport', dataUrl: await screenshotDataUrl(page), detail: 'auto' });
+    await page.waitForTimeout(160);
+    images.push({ label: 'desktop lower viewport', dataUrl: await screenshotDataUrl(page), detail: 'high' });
   }
 
   await page.evaluate(() => window.scrollTo(0, 0));
@@ -181,12 +101,12 @@ async function renderGeneratedEvidence(context: any, html: string) {
   try {
     await previewPage.setViewportSize(VIEWPORTS.desktop);
     await previewPage.setContent(html, { waitUntil: 'domcontentloaded' });
-    await previewPage.waitForTimeout(250);
+    await previewPage.waitForTimeout(350);
     const desktop = await screenshotDataUrl(previewPage);
 
     await previewPage.setViewportSize(VIEWPORTS.mobile);
     await previewPage.setContent(html, { waitUntil: 'domcontentloaded' });
-    await previewPage.waitForTimeout(250);
+    await previewPage.waitForTimeout(350);
     const mobile = await screenshotDataUrl(previewPage);
 
     return { desktop, mobile };
@@ -195,11 +115,20 @@ async function renderGeneratedEvidence(context: any, html: string) {
   }
 }
 
+function semanticSlice(signal: Signal, elementLimit: number, landmarkLimit: number) {
+  return {
+    title: signal.title,
+    headings: signal.headings.slice(0, 30),
+    landmarks: signal.landmarks.slice(0, landmarkLimit),
+    elements: (signal.elements || []).slice(0, elementLimit),
+  };
+}
+
 async function analyze(target: string, env: Env, qualityRequested: boolean) {
   const browser = await launch(env.BROWSER);
   try {
     const context = await browser.newContext({
-      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/142 Safari/537.36 GetSetGo/0.7',
+      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/142 Safari/537.36 GetSetGo/0.8',
     });
     const page = await context.newPage();
     const breakpoints: Record<string, Signal> = {};
@@ -209,8 +138,8 @@ async function analyze(target: string, env: Env, qualityRequested: boolean) {
     for (const [name, viewport] of Object.entries(VIEWPORTS)) {
       await page.setViewportSize(viewport);
       await page.goto(target, { waitUntil: 'domcontentloaded', timeout: 30000 });
-      await page.waitForTimeout(700);
-      const signal = await extractSignals(page);
+      await page.waitForTimeout(900);
+      const signal = await extractRichSignals(page);
       breakpoints[name] = signal;
       if (qualityRequested && configured) images.push(...await captureVisualEvidence(page, name, signal));
     }
@@ -223,6 +152,7 @@ async function analyze(target: string, env: Env, qualityRequested: boolean) {
     let qualityError: string | null = null;
     let criticError: string | null = null;
     let critic: any = null;
+    const criticHistory: any[] = [];
 
     if (qualityRequested && configured) {
       try {
@@ -231,42 +161,50 @@ async function analyze(target: string, env: Env, qualityRequested: boolean) {
           designIR,
           componentPlan,
           semanticEvidence: {
-            desktop: { title: breakpoints.desktop.title, headings: breakpoints.desktop.headings, landmarks: breakpoints.desktop.landmarks },
-            tablet: { headings: breakpoints.tablet.headings.slice(0, 18), landmarks: breakpoints.tablet.landmarks.slice(0, 50) },
-            mobile: { headings: breakpoints.mobile.headings.slice(0, 18), landmarks: breakpoints.mobile.landmarks.slice(0, 50) },
+            desktop: semanticSlice(breakpoints.desktop, 220, 100),
+            tablet: semanticSlice(breakpoints.tablet, 120, 70),
+            mobile: semanticSlice(breakpoints.mobile, 160, 80),
           },
           images,
         });
 
-        const rendered = await renderGeneratedEvidence(context, quality.generated.previewHtml);
         const originalDesktop = images.find((x) => x.label === 'desktop top viewport')?.dataUrl;
         const originalMobile = images.find((x) => x.label === 'mobile top viewport')?.dataUrl;
 
         if (originalDesktop) {
-          try {
-            critic = await runVisualCritic(env, {
-              target,
-              visualSpec: quality.visualSpec,
-              appTsx: quality.generated.appTsx,
-              stylesCss: quality.generated.stylesCss,
-              previewHtml: quality.generated.previewHtml,
-              originalDesktop,
-              generatedDesktop: rendered.desktop,
-              originalMobile,
-              generatedMobile: originalMobile ? rendered.mobile : undefined,
-            });
+          for (let pass = 1; pass <= MAX_CRITIC_PASSES; pass++) {
+            try {
+              const rendered = await renderGeneratedEvidence(context, quality.generated.previewHtml);
+              critic = await runVisualCritic(env, {
+                target,
+                visualSpec: quality.visualSpec,
+                appTsx: quality.generated.appTsx,
+                stylesCss: quality.generated.stylesCss,
+                previewHtml: quality.generated.previewHtml,
+                originalDesktop,
+                generatedDesktop: rendered.desktop,
+                originalMobile,
+                generatedMobile: originalMobile ? rendered.mobile : undefined,
+              });
 
-            quality.aiCalls = (quality.aiCalls || 0) + 1;
-            quality.models = { ...(quality.models || {}), critic: critic.model };
-            quality.generated = {
-              ...quality.generated,
-              appTsx: critic.revisedAppTsx,
-              stylesCss: critic.revisedStylesCss,
-              previewHtml: critic.revisedPreviewHtml,
-              qualityNotes: [...(quality.generated.qualityNotes || []), ...(critic.notes || [])],
-            };
-          } catch (error) {
-            criticError = error instanceof Error ? error.message : 'Visual critic failed';
+              quality.aiCalls = (quality.aiCalls || 0) + 1;
+              quality.models = { ...(quality.models || {}), critic: critic.model };
+              criticHistory.push({ pass, score: critic.score, verdict: critic.verdict, issues: critic.issues });
+
+              const passed = critic.verdict === 'pass' && Number(critic.score) >= QUALITY_THRESHOLD;
+              if (passed) break;
+
+              quality.generated = {
+                ...quality.generated,
+                appTsx: critic.revisedAppTsx,
+                stylesCss: critic.revisedStylesCss,
+                previewHtml: critic.revisedPreviewHtml,
+                qualityNotes: [...(quality.generated.qualityNotes || []), ...(critic.notes || [])],
+              };
+            } catch (error) {
+              criticError = error instanceof Error ? error.message : 'Visual critic failed';
+              break;
+            }
           }
         }
       } catch (error) {
@@ -274,10 +212,11 @@ async function analyze(target: string, env: Env, qualityRequested: boolean) {
       }
     }
 
+    const criticPassed = Boolean(critic && critic.verdict === 'pass' && Number(critic.score) >= QUALITY_THRESHOLD);
     const generatedPreview = quality?.generated?.previewHtml
       ? {
-          version: '0.7.0',
-          mode: critic ? 'ai-critic-corrected-preview' : 'ai-quality-preview',
+          version: '0.8.0',
+          mode: criticPassed ? 'ai-verified-preview' : critic ? 'ai-iterated-preview' : 'ai-quality-preview',
           html: quality.generated.previewHtml,
           sandboxRecommended: true,
           aiCalls: quality.aiCalls,
@@ -288,7 +227,7 @@ async function analyze(target: string, env: Env, qualityRequested: boolean) {
     const selected = configured ? selectAi(env, 'architect') : null;
 
     return {
-      version: '0.7.0',
+      version: '0.8.0',
       target,
       generatedAt: new Date().toISOString(),
       policy: {
@@ -301,7 +240,9 @@ async function analyze(target: string, env: Env, qualityRequested: boolean) {
         models: quality?.models || null,
         imageModel: env.MODEL_API_KEY ? (env.MUSE_IMAGE_MODEL || 'muse-image-1.0') : null,
         imageAssetsGenerated: quality?.assets?.length || 0,
-        qualityGate: critic ? 'visual-critic-complete' : quality ? 'visual-critic-unavailable' : 'not-run',
+        qualityThreshold: QUALITY_THRESHOLD,
+        criticPasses: criticHistory.length,
+        qualityGate: criticPassed ? 'pass' : critic ? 'needs-improvement' : quality ? 'critic-unavailable' : 'not-run',
         rawDomReturned: false,
         screenshotEmbeddedInResponse: false,
       },
@@ -323,6 +264,7 @@ async function analyze(target: string, env: Env, qualityRequested: boolean) {
         notes: critic.notes,
         provider: critic.provider,
         model: critic.model,
+        history: criticHistory,
       } : null,
       qualityNotes: quality?.generated?.qualityNotes || [],
       qualityError,
@@ -345,11 +287,13 @@ export default {
         ok: true,
         service: 'get-set-go-api',
         browser: 'cloudflare-browser-run',
-        pipeline: 'Muse quality pipeline + conditional Muse Image + visual critic v0.7',
+        pipeline: 'rich scene evidence + Muse product media + iterative visual critic v0.8',
         aiConfigured: configured,
         provider: selected?.provider || null,
         model: selected?.model || null,
         imageModel: env.MODEL_API_KEY ? (env.MUSE_IMAGE_MODEL || 'muse-image-1.0') : null,
+        qualityThreshold: QUALITY_THRESHOLD,
+        maxCriticPasses: MAX_CRITIC_PASSES,
       });
     }
 
