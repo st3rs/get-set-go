@@ -1,5 +1,6 @@
 import { launch, type BrowserWorker } from '@cloudflare/playwright';
 import { runQualityPipeline } from './ai';
+import { runVisualCritic } from './critic';
 import { buildComponentPlan, buildDesignIR, buildGeneratedPreview, type Signal } from './design';
 
 interface Env {
@@ -176,11 +177,30 @@ async function captureVisualEvidence(page: any, name: string, signal: Signal) {
   return images;
 }
 
+async function renderGeneratedEvidence(context: any, html: string) {
+  const previewPage = await context.newPage();
+  try {
+    await previewPage.setViewportSize(VIEWPORTS.desktop);
+    await previewPage.setContent(html, { waitUntil: 'domcontentloaded' });
+    await previewPage.waitForTimeout(250);
+    const desktop = await screenshotDataUrl(previewPage);
+
+    await previewPage.setViewportSize(VIEWPORTS.mobile);
+    await previewPage.setContent(html, { waitUntil: 'domcontentloaded' });
+    await previewPage.waitForTimeout(250);
+    const mobile = await screenshotDataUrl(previewPage);
+
+    return { desktop, mobile };
+  } finally {
+    await previewPage.close();
+  }
+}
+
 async function analyze(target: string, env: Env, qualityRequested: boolean) {
   const browser = await launch(env.BROWSER);
   try {
     const context = await browser.newContext({
-      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/142 Safari/537.36 GetSetGo/0.4',
+      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/142 Safari/537.36 GetSetGo/0.5',
     });
     const page = await context.newPage();
     const breakpoints: Record<string, Signal> = {};
@@ -201,6 +221,8 @@ async function analyze(target: string, env: Env, qualityRequested: boolean) {
 
     let quality: any = null;
     let qualityError: string | null = null;
+    let criticError: string | null = null;
+    let critic: any = null;
 
     if (qualityRequested && env.OPENAI_API_KEY) {
       try {
@@ -215,6 +237,37 @@ async function analyze(target: string, env: Env, qualityRequested: boolean) {
           },
           images,
         });
+
+        const rendered = await renderGeneratedEvidence(context, quality.generated.previewHtml);
+        const originalDesktop = images.find((x) => x.label === 'desktop top viewport')?.dataUrl;
+        const originalMobile = images.find((x) => x.label === 'mobile top viewport')?.dataUrl;
+
+        if (originalDesktop) {
+          try {
+            critic = await runVisualCritic(env, {
+              target,
+              visualSpec: quality.visualSpec,
+              appTsx: quality.generated.appTsx,
+              stylesCss: quality.generated.stylesCss,
+              previewHtml: quality.generated.previewHtml,
+              originalDesktop,
+              generatedDesktop: rendered.desktop,
+              originalMobile,
+              generatedMobile: originalMobile ? rendered.mobile : undefined,
+            });
+
+            quality.aiCalls = 3;
+            quality.generated = {
+              ...quality.generated,
+              appTsx: critic.revisedAppTsx,
+              stylesCss: critic.revisedStylesCss,
+              previewHtml: critic.revisedPreviewHtml,
+              qualityNotes: [...(quality.generated.qualityNotes || []), ...(critic.notes || [])],
+            };
+          } catch (error) {
+            criticError = error instanceof Error ? error.message : 'Visual critic failed';
+          }
+        }
       } catch (error) {
         qualityError = error instanceof Error ? error.message : 'Quality pipeline failed';
       }
@@ -222,8 +275,8 @@ async function analyze(target: string, env: Env, qualityRequested: boolean) {
 
     const generatedPreview = quality?.generated?.previewHtml
       ? {
-          version: '0.4.0',
-          mode: 'ai-quality-preview',
+          version: '0.5.0',
+          mode: critic ? 'ai-critic-corrected-preview' : 'ai-quality-preview',
           html: quality.generated.previewHtml,
           sandboxRecommended: true,
           aiCalls: quality.aiCalls,
@@ -232,7 +285,7 @@ async function analyze(target: string, env: Env, qualityRequested: boolean) {
       : deterministicPreview;
 
     return {
-      version: '0.4.0',
+      version: '0.5.0',
       target,
       generatedAt: new Date().toISOString(),
       policy: {
@@ -241,6 +294,7 @@ async function analyze(target: string, env: Env, qualityRequested: boolean) {
         aiConfigured: Boolean(env.OPENAI_API_KEY),
         aiCalls: quality?.aiCalls || 0,
         model: quality?.model || (env.OPENAI_MODEL || 'gpt-5.6-sol'),
+        qualityGate: critic ? 'visual-critic-complete' : quality ? 'visual-critic-unavailable' : 'not-run',
         rawDomReturned: false,
         screenshotEmbeddedInResponse: false,
       },
@@ -253,8 +307,15 @@ async function analyze(target: string, env: Env, qualityRequested: boolean) {
         appTsx: quality.generated.appTsx,
         stylesCss: quality.generated.stylesCss,
       } : null,
+      visualCritic: critic ? {
+        score: critic.score,
+        verdict: critic.verdict,
+        issues: critic.issues,
+        notes: critic.notes,
+      } : null,
       qualityNotes: quality?.generated?.qualityNotes || [],
       qualityError,
+      criticError,
     };
   } finally {
     await browser.close();
@@ -271,7 +332,7 @@ export default {
         ok: true,
         service: 'get-set-go-api',
         browser: 'cloudflare-browser-run',
-        pipeline: 'quality-first visual architect v0.4',
+        pipeline: 'quality-first + render-compare-correct v0.5',
         aiConfigured: Boolean(env.OPENAI_API_KEY),
         model: env.OPENAI_MODEL || 'gpt-5.6-sol',
       });
