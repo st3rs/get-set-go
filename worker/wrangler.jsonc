@@ -10,6 +10,8 @@
   },
   "vars": {
     "FRONTEND_ORIGIN": "https://get-set-go.pages.dev",
+    "OPENROUTER_MODEL": "google/gemma-4-26b-a4b-it:free",
+    "OPENROUTER_CODE_MODEL": "google/gemma-4-26b-a4b-it:free",
     "OPENAI_MODEL": "gpt-5.6-sol"
   }
 }
