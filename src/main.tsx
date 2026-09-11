@@ -1,6 +1,7 @@
 import React, { useMemo, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import './styles.css'
+import './prompt.css'
 
 type Analysis = {
   target?: string
@@ -47,6 +48,7 @@ const audiences = [
 
 const faqs = [
   ['Does Get Set Go copy the source code?', 'No. It reconstructs from rendered browser evidence, measured geometry and design reasoning.'],
+  ['Can I tell it what to change from the reference?', 'Yes. Use the main prompt for the goal and add instruction steps when the work needs an explicit sequence.'],
   ['Is the result just an image?', 'No. The target output is editable React and CSS, with a live generated preview.'],
   ['What happens when the first result is weak?', 'The visual critic renders the draft, compares it against the reference and can revise it across multiple passes.'],
   ['Can it handle product cards and media?', 'Yes. Product-heavy interfaces can use generated neutral mock media so cards do not collapse into empty placeholders.'],
@@ -54,9 +56,23 @@ const faqs = [
 
 function App() {
   const [url, setUrl] = useState('https://codecanyon.net')
+  const [prompt, setPrompt] = useState('')
+  const [steps, setSteps] = useState<string[]>([])
   const [status, setStatus] = useState('Ready for a reference')
   const [busy, setBusy] = useState(false)
   const [result, setResult] = useState<Analysis | null>(null)
+
+  function addInstructionStep() {
+    setSteps((current) => [...current, ''])
+  }
+
+  function updateInstructionStep(index: number, value: string) {
+    setSteps((current) => current.map((step, stepIndex) => stepIndex === index ? value : step))
+  }
+
+  function removeInstructionStep(index: number) {
+    setSteps((current) => current.filter((_, stepIndex) => stepIndex !== index))
+  }
 
   async function submit(e: React.FormEvent) {
     e.preventDefault()
@@ -69,13 +85,18 @@ function App() {
     }
 
     setBusy(true)
-    setStatus('Reading the rendered interface…')
+    setStatus('Reading the reference and following your instructions…')
 
     try {
       const response = await fetch('/api/analyze', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ url, quality: true }),
+        body: JSON.stringify({
+          url,
+          quality: true,
+          prompt: prompt.trim(),
+          steps: steps.map((step) => step.trim()).filter(Boolean),
+        }),
       })
       const contentType = response.headers.get('content-type') || ''
       const text = await response.text()
@@ -127,15 +148,56 @@ function App() {
           <div className="heroInner wrap">
             <p className="kicker">VISUAL ARCHITECT FOR THE WEB</p>
             <h1>Turn a reference website into working interface code.</h1>
-            <p className="heroCopy">Give Get Set Go a public URL. It studies the rendered design, rebuilds the interface, renders the result and critiques its own work before handing you editable React and CSS.</p>
+            <p className="heroCopy">Give Get Set Go a reference, then tell it what you actually want. Use one main prompt or break a complex build into ordered instruction steps.</p>
 
-            <form id="reconstruct" onSubmit={submit} className="reconstructBox">
-              <div className="inputTopline"><span>Reference URL</span><span className="inputState">{busy ? 'Running quality pipeline' : 'Public http/https'}</span></div>
-              <div className="inputRow">
-                <input type="url" value={url} onChange={(e) => setUrl(e.target.value)} disabled={busy} aria-label="Reference URL" />
-                <button type="submit" disabled={busy}>{busy ? 'Reconstructing…' : 'Reconstruct'}</button>
+            <form id="reconstruct" onSubmit={submit} className="instructionComposer">
+              <section className="urlPanel">
+                <div className="composerTopline">
+                  <div><span className="composerLabel">Reference URL</span><small>What should Get Set Go study?</small></div>
+                  <span className="inputState">{busy ? 'Reading reference' : 'Public http/https'}</span>
+                </div>
+                <div className="referenceRow">
+                  <input type="url" value={url} onChange={(e) => setUrl(e.target.value)} disabled={busy} aria-label="Reference URL" />
+                </div>
+              </section>
+
+              <section className="promptPanel mainPromptPanel">
+                <div className="composerTopline">
+                  <div><span className="composerLabel">Main prompt</span><small>Describe the result you want, including changes from the reference.</small></div>
+                  <span className="optionalTag">Optional</span>
+                </div>
+                <textarea
+                  value={prompt}
+                  onChange={(e) => setPrompt(e.target.value)}
+                  disabled={busy}
+                  aria-label="Main prompt"
+                  placeholder="Example: Rebuild this marketplace with a cleaner premium layout. Keep the information density and category structure, but make product cards more modern, use realistic digital-product thumbnails, and simplify the header."
+                />
+                <div className="promptMeta"><span>Main instruction</span><span>{prompt.length.toLocaleString()} characters</span></div>
+              </section>
+
+              {steps.map((step, index) => (
+                <section className="promptPanel stepPromptPanel" key={`step-${index}`}>
+                  <div className="composerTopline">
+                    <div><span className="composerLabel">Instruction step {index + 1}</span><small>Executed as an ordered instruction after the main prompt.</small></div>
+                    <button type="button" className="removeStep" onClick={() => removeInstructionStep(index)} disabled={busy} aria-label={`Remove instruction step ${index + 1}`}>Remove</button>
+                  </div>
+                  <textarea
+                    value={step}
+                    onChange={(e) => updateInstructionStep(index, e.target.value)}
+                    disabled={busy}
+                    aria-label={`Instruction step ${index + 1}`}
+                    placeholder={`Step ${index + 1}: Describe the next concrete change or constraint…`}
+                  />
+                  <div className="promptMeta"><span>Step {index + 1}</span><span>{step.length.toLocaleString()} characters</span></div>
+                </section>
+              ))}
+
+              <div className="composerActions">
+                <button type="button" className="addStepButton" onClick={addInstructionStep} disabled={busy}><span>+</span> Add instruction step</button>
+                <button type="submit" className="reconstructButton" disabled={busy}>{busy ? 'Reconstructing…' : 'Reconstruct'}</button>
               </div>
-              <div className="promptHints"><span>Rendered screenshots</span><span>Responsive geometry</span><span>Muse reasoning</span><span>React + CSS</span></div>
+              <div className="composerHints"><span>Reference evidence</span><b>→</b><span>Main prompt</span>{steps.length > 0 && <><b>→</b><span>{steps.length} instruction {steps.length === 1 ? 'step' : 'steps'}</span></>}<b>→</b><span>React + visual QA</span></div>
             </form>
 
             <div className="statusLine"><span className={busy ? 'pulseDot active' : 'pulseDot'} />{status}</div>
@@ -149,10 +211,10 @@ function App() {
         </section>
 
         <section id="workflow" className="section wrap centerSection">
-          <p className="kicker">THREE MOVES, ONE PROMPT</p>
-          <h2>Reference in. Evidence measured. Interface rebuilt.</h2>
-          <p className="sectionCopy">The product flow stays simple even though the reconstruction engine underneath is doing browser capture, design analysis, generation and visual QA.</p>
-          <div className="modeTabs"><span className="active">1 · Capture</span><span>2 · Reconstruct</span><span>3 · Critique</span></div>
+          <p className="kicker">REFERENCE + INSTRUCTIONS</p>
+          <h2>Study the reference. Follow the brief. Prove the result.</h2>
+          <p className="sectionCopy">The reference supplies visual evidence. Your prompt supplies intent. Ordered steps let you turn a complicated redesign into a build plan instead of one giant ambiguous request.</p>
+          <div className="modeTabs"><span className="active">1 · Capture</span><span>2 · Instruct</span><span>3 · Reconstruct</span><span>4 · Critique</span></div>
 
           <div className="productDemo">
             <div className="demoBar"><i /><i /><i /><span>get-set-go.pages.dev</span><b>Quality mode</b></div>
@@ -160,7 +222,7 @@ function App() {
               <aside className="demoAside">
                 <small>REFERENCE</small>
                 <strong>{result?.target || 'https://codecanyon.net'}</strong>
-                {['Browser capture', 'Design signals', 'Scene graph', 'Visual architect', 'React generation', 'Visual critic'].map((item, index) => (
+                {['Browser capture', 'User instructions', 'Design scene graph', 'Visual architect', 'React generation', 'Visual critic'].map((item, index) => (
                   <div className="demoStep" key={item}><span>{String(index + 1).padStart(2, '0')}</span><p>{item}</p><em>{index < 3 || result ? 'done' : 'ready'}</em></div>
                 ))}
               </aside>
@@ -170,7 +232,7 @@ function App() {
                 ) : (
                   <div className="emptyPreview">
                     <div className="fakeNav"><span /><span /><span /></div>
-                    <div className="fakeHero"><small>Generated preview</small><h3>Your reconstruction appears here.</h3><p>Paste a public URL above to run the full quality pipeline.</p><button type="button" onClick={() => document.getElementById('reconstruct')?.scrollIntoView({ behavior: 'smooth' })}>Choose a reference</button></div>
+                    <div className="fakeHero"><small>Generated preview</small><h3>Your reconstruction appears here.</h3><p>Add a reference and optional instructions above to run the full quality pipeline.</p><button type="button" onClick={() => document.getElementById('reconstruct')?.scrollIntoView({ behavior: 'smooth' })}>Start a reconstruction</button></div>
                     <div className="fakeCards"><i /><i /><i /></div>
                   </div>
                 )}
@@ -233,13 +295,13 @@ function App() {
 
         <section className="finalCta wrap">
           <p className="kicker">READY WHEN YOU ARE</p>
-          <h2>Give it a reference. Make it prove the result.</h2>
-          <p>Start with one public URL and inspect what the reconstruction engine can actually reproduce.</p>
-          <button onClick={() => document.getElementById('reconstruct')?.scrollIntoView({ behavior: 'smooth' })}>Reconstruct a website</button>
+          <h2>Give it a reference. Tell it what to change.</h2>
+          <p>Use one prompt for a simple reconstruction or add ordered instruction steps for a more deliberate build.</p>
+          <button onClick={() => document.getElementById('reconstruct')?.scrollIntoView({ behavior: 'smooth' })}>Start with a reference</button>
         </section>
       </main>
 
-      <footer className="footer wrap"><a className="brand" href="#top"><span className="logoMark">G</span><span>Get Set Go</span></a><p>Visual interface reconstruction · Browser evidence → Design IR → React → Critic</p><span>Built for editable output.</span></footer>
+      <footer className="footer wrap"><a className="brand" href="#top"><span className="logoMark">G</span><span>Get Set Go</span></a><p>Reference evidence → Instructions → Design IR → React → Critic</p><span>Built for editable output.</span></footer>
     </div>
   )
 }
