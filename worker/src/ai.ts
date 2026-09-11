@@ -156,10 +156,7 @@ function referenceBackedAssetRequests(input: { target: string; designIR: any; se
   });
 }
 
-function mergeAssetRequests(
-  input: { target: string; designIR: any; semanticEvidence: any },
-  designPlan: DesignPlan,
-): AssetRequest[] {
+function mergeAssetRequests(input: { target: string; designIR: any; semanticEvidence: any }, designPlan: DesignPlan): AssetRequest[] {
   const max = maxAssetsForSite(input);
   const forced = referenceBackedAssetRequests(input);
   const resolver = designPlan.assetRequests
@@ -214,22 +211,19 @@ async function mapLimit<T, R>(items: T[], limit: number, worker: (item: T, index
   return results;
 }
 
-async function resolveDesignPlan(
-  env: AiEnv,
-  input: {
-    target: string;
-    designIR: any;
-    componentPlan: any;
-    semanticEvidence: any;
-    images: ImageEvidence[];
-    userInstructions?: UserInstructions;
-  },
-) {
+async function resolveDesignPlan(env: AiEnv, input: {
+  target: string;
+  designIR: any;
+  componentPlan: any;
+  semanticEvidence: any;
+  images: ImageEvidence[];
+  userInstructions?: UserInstructions;
+}) {
   const instructions = instructionText(input.userInstructions);
   const digitalMarketplace = isDigitalMarketplace(input);
   const content: any[] = [{
     type: 'input_text',
-    text: `You are the Design Token Resolver and Structural Planner for reconstruction mode. You are NOT the code generator. Output only the strict DesignPlan JSON contract.\n\n${instructions}\n\nTARGET: ${input.target}\n\nMEASURED DESIGN IR:\n${compactJson(input.designIR, 30000)}\n\nSTRUCTURAL HINTS:\n${compactJson(input.componentPlan, 12000)}\n\nSEMANTIC + GEOMETRY EVIDENCE:\n${compactJson(input.semanticEvidence, 24000)}\n\nRULES:\n- Explicit user instructions override only the aspects they intentionally change.\n- Measured geometry and screenshots are truth everywhere else.\n- Resolve semantic design tokens from evidence rather than generic defaults.\n- Preserve distinctive editorial, brutalist, dense fintech and marketplace character.\n- This target is ${digitalMarketplace ? 'a DIGITAL PRODUCT MARKETPLACE; product preview media is mandatory' : 'not specifically classified as a digital marketplace'}.\n- Runtime creates mandatory media requests directly from browser evidence. Your assetRequests are supplemental.\n- Never request copied proprietary screenshots, logos or trademarks.`,
+    text: `You are the Design Token Resolver for reconstruction mode. You are NOT the code generator. Output only the strict DesignPlan JSON contract.\n\n${instructions}\n\nTARGET: ${input.target}\n\nMEASURED DESIGN IR V2:\n${compactJson(input.designIR, 36000)}\n\nSTRUCTURAL COMPILER HINTS:\n${compactJson(input.componentPlan, 16000)}\n\nSEMANTIC + GEOMETRY EVIDENCE:\n${compactJson(input.semanticEvidence, 26000)}\n\nRULES:\n- Explicit user instructions override only aspects they intentionally change.\n- Measured geometry and browser structure are truth everywhere else.\n- Resolve semantic tokens from evidence, not generic defaults.\n- Do NOT collapse the page into Hero/Card/Grid semantics. The structural snapshot is handled directly by codegen.\n- Preserve distinctive editorial, brutalist, dense fintech and marketplace character.\n- This target is ${digitalMarketplace ? 'a DIGITAL PRODUCT MARKETPLACE; product preview media is mandatory' : 'not specifically classified as a digital marketplace'}.\n- Runtime creates mandatory media requests directly from browser evidence. Your assetRequests are supplemental.`,
   }];
 
   for (const image of input.images) {
@@ -242,16 +236,10 @@ async function resolveDesignPlan(
     input: [{ role: 'user', content }],
     text: { verbosity: 'medium', format: { type: 'json_schema', name: 'guardrailed_design_plan', strict: true, schema: DESIGN_PLAN_JSON_SCHEMA } },
   });
-
   const output = extractResponseText(response.payload);
   if (!output) throw new Error('Design resolver returned no output');
   const plan = DesignPlanSchema.parse(JSON.parse(output));
-  return {
-    plan,
-    registryPlan: resolveRegistryPlan(plan),
-    cssVariables: tokensToCssVariables(plan.tokens),
-    response,
-  };
+  return { plan, registryPlan: resolveRegistryPlan(plan), cssVariables: tokensToCssVariables(plan.tokens), response };
 }
 
 function imagePrompt(asset: AssetRequest, digitalMarketplace: boolean) {
@@ -268,33 +256,24 @@ function imagePrompt(asset: AssetRequest, digitalMarketplace: boolean) {
 async function generateAssets(env: AiEnv, requests: AssetRequest[], digitalMarketplace: boolean) {
   const generatedAssets: GeneratedAsset[] = [];
   const assetErrors: string[] = [];
-  if (!env.MODEL_API_KEY) {
-    return {
-      generatedAssets,
-      assetErrors: requests.length ? ['Muse Image unavailable: MODEL_API_KEY is not configured'] : [],
-      attempted: 0,
-    };
-  }
+  if (!env.MODEL_API_KEY) return { generatedAssets, assetErrors: requests.length ? ['Muse Image unavailable: MODEL_API_KEY is not configured'] : [], attempted: 0 };
 
   const results = await mapLimit(requests, 3, async (asset, index) => {
     const id = safeAssetId(asset.id, index);
     try {
-      // Native Muse Image call. No Spark tools, response schema, or image-generation tool wrapper.
       const imageResponse = await museImageRequest(env, { input: imagePrompt(asset, digitalMarketplace) });
       const image = extractMuseImage(imageResponse.payload);
       if (!image) throw new Error('Muse Image returned no image_generation_call result');
       if (image.mimeType === 'application/octet-stream') throw new Error('Muse Image returned bytes with an unrecognized image format');
-      return {
-        asset: {
-          id,
-          role: asset.role,
-          size: asset.size,
-          model: imageResponse.model,
-          mimeType: image.mimeType,
-          byteLengthEstimate: image.byteLengthEstimate,
-          dataUrl: `data:${image.mimeType};base64,${image.base64}`,
-        } as GeneratedAsset,
-      };
+      return { asset: {
+        id,
+        role: asset.role,
+        size: asset.size,
+        model: imageResponse.model,
+        mimeType: image.mimeType,
+        byteLengthEstimate: image.byteLengthEstimate,
+        dataUrl: `data:${image.mimeType};base64,${image.base64}`,
+      } as GeneratedAsset };
     } catch (error) {
       return { error: `${id}: ${error instanceof Error ? error.message : 'Image generation failed'}` };
     }
@@ -314,27 +293,17 @@ export async function runMuseImageSmoke(env: AiEnv) {
   const image = extractMuseImage(response.payload);
   if (!image) throw new Error('Muse Image smoke test returned no image_generation_call result');
   if (image.mimeType === 'application/octet-stream') throw new Error('Muse Image smoke test returned an unrecognized image format');
-  return {
-    ok: true,
-    provider: response.provider,
-    model: response.model,
-    mimeType: image.mimeType,
-    byteLengthEstimate: image.byteLengthEstimate,
-    hasImageBytes: image.base64.length > 1000,
-  };
+  return { ok: true, provider: response.provider, model: response.model, mimeType: image.mimeType, byteLengthEstimate: image.byteLengthEstimate, hasImageBytes: image.base64.length > 1000 };
 }
 
-export async function runQualityPipeline(
-  env: AiEnv,
-  input: {
-    target: string;
-    designIR: any;
-    componentPlan: any;
-    semanticEvidence: any;
-    images: ImageEvidence[];
-    userInstructions?: UserInstructions;
-  },
-) {
+export async function runQualityPipeline(env: AiEnv, input: {
+  target: string;
+  designIR: any;
+  componentPlan: any;
+  semanticEvidence: any;
+  images: ImageEvidence[];
+  userInstructions?: UserInstructions;
+}) {
   const instructions = instructionText(input.userInstructions);
   const resolved = await resolveDesignPlan(env, input);
   const designPlan: DesignPlan = resolved.plan;
@@ -343,12 +312,23 @@ export async function runQualityPipeline(
   const digitalMarketplace = isDigitalMarketplace(input);
   const requestedAssets = mergeAssetRequests(input, designPlan);
   const requiredMinimum = minimumRequiredAssets(input, requestedAssets.length);
-
   const assetPromise = generateAssets(env, requestedAssets, digitalMarketplace);
+
+  const structuralContract = {
+    reconstructionStrategy: input.designIR?.reconstructionStrategy,
+    siteType: input.designIR?.siteType,
+    desktop: input.designIR?.structuralSnapshot?.desktop,
+    tablet: input.designIR?.structuralSnapshot?.tablet,
+    mobile: input.designIR?.structuralSnapshot?.mobile,
+    repeatedGroups: input.designIR?.repeatedGroups,
+    crossViewportMatches: input.designIR?.crossViewportMatches,
+    compilerRules: input.componentPlan?.compilerRules,
+    constraints: input.componentPlan?.constraints,
+  };
 
   const codegenContent: any[] = [{
     type: 'input_text',
-    text: `You are the target React code generator for reconstruction mode. Do not redesign the reference.\n\n${instructions}\n\nTARGET: ${input.target}\n\nDESIGN PLAN:\n${compactJson(designPlan, 36000)}\n\nCOMPONENT ROUTING:\n${compactJson(registryPlan, 26000)}\n\nSEMANTIC CSS VARIABLES:\n${cssVariableBlock(cssVariables)}\n\nMANDATORY GENERATED ASSET MANIFEST:\n${compactJson(requestedAssets, 16000)}\n\nRULES:\n- Return production-quality React TSX, CSS, and a self-contained previewHtml.\n- Preserve measured geometry and distinctive visual character.\n- For EVERY item in MANDATORY GENERATED ASSET MANIFEST, put its exact {{ASSET:id}} marker into a visible media slot in previewHtml and App.tsx.\n- Never replace a required asset with a blank rectangle, emoji, gradient, or icon.\n- Product copy, prices, badges and CTA remain HTML.\n- Explicit instructions override only intentional changes.\n- previewHtml must be standalone and script-free.`,
+    text: `You are the STRUCTURAL reconstruction code generator. Your job is to rebuild measured browser structure, not redesign the page.\n\n${instructions}\n\nTARGET: ${input.target}\n\nSTRUCTURAL RECONSTRUCTION CONTRACT V2, HIGHEST PRIORITY AFTER EXPLICIT USER OVERRIDES:\n${compactJson(structuralContract, 76000)}\n\nRESOLVED SEMANTIC TOKENS:\n${cssVariableBlock(cssVariables)}\n\nDESIGN PLAN, TOKEN/INTENT SUPPORT ONLY:\n${compactJson(designPlan, 24000)}\n\nREGISTRY ROUTING, ADVISORY ONLY IN RECONSTRUCTION MODE:\n${compactJson(registryPlan, 10000)}\n\nMANDATORY GENERATED ASSET MANIFEST:\n${compactJson(requestedAssets, 16000)}\n\nNON-NEGOTIABLE RULES:\n- Reconstruct the measured parent-child-sibling hierarchy and section order. Do NOT collapse it into a generic Hero + cards layout.\n- Measured x/y/width/height, display, flex/grid direction, gaps, padding, typography and responsive changes are implementation evidence. Preserve them unless an explicit user instruction overrides them.\n- For every reconstructed source node that appears in structuralSnapshot sections, repeatedGroups, media, navigation, controls, or major containers, emit data-ref-id=\"<source stable node id>\" on the corresponding DOM element in BOTH App.tsx and previewHtml. Never invent a data-ref-id.\n- Keep the same data-ref-id across desktop/tablet/mobile CSS states so objective geometry can be measured after render.\n- Registry components are behavior helpers only. Structural evidence overrides registry shape.\n- For EVERY item in MANDATORY GENERATED ASSET MANIFEST, put its exact {{ASSET:id}} marker into a visible media slot in BOTH App.tsx and previewHtml. Never replace required media with blank rectangles, gradients, emoji or icons.\n- Product copy, prices, badges and CTA remain HTML.\n- Use semantic tokens for palette/typography, but measured reconstruction geometry may use exact evidence-backed values.\n- Return production-quality React TSX, CSS, and standalone script-free previewHtml.`,
   }];
 
   for (const image of input.images) {
@@ -359,11 +339,10 @@ export async function runQualityPipeline(
   const codegenPromise = responsesRequest(env, 'codegen', {
     reasoning: { effort: 'high' },
     input: [{ role: 'user', content: codegenContent }],
-    text: { verbosity: 'medium', format: { type: 'json_schema', name: 'guardrailed_codegen_output', strict: true, schema: CODEGEN_SCHEMA } },
+    text: { verbosity: 'medium', format: { type: 'json_schema', name: 'structural_reconstruction_output', strict: true, schema: CODEGEN_SCHEMA } },
   });
 
   const [assetResult, codegenResponse] = await Promise.all([assetPromise, codegenPromise]);
-
   if (requiredMinimum > 0 && assetResult.generatedAssets.length < requiredMinimum) {
     throw new Error(`Muse Image acceptance gate FAILED: generated ${assetResult.generatedAssets.length}/${requestedAssets.length}; minimum required is ${requiredMinimum}. ${assetResult.assetErrors.slice(0, 4).join(' | ') || 'No usable image bytes returned.'}`);
   }
@@ -371,7 +350,6 @@ export async function runQualityPipeline(
   const codegenText = extractResponseText(codegenResponse.payload);
   if (!codegenText) throw new Error('Code generation returned no output');
   const generated = JSON.parse(codegenText);
-
   const successfulIds = new Set(assetResult.generatedAssets.map((asset) => asset.id));
   const injectedIds = assetResult.generatedAssets
     .filter((asset) => markerPresent(generated.previewHtml, asset.id) && markerPresent(generated.appTsx, asset.id))
@@ -397,7 +375,7 @@ export async function runQualityPipeline(
   }
 
   return {
-    mode: 'reconstruction-recovery',
+    mode: 'structural-reconstruction-v2',
     provider: resolved.response.provider,
     model: codegenResponse.model,
     models: {
@@ -416,9 +394,9 @@ export async function runQualityPipeline(
       errors: assetResult.assetErrors,
     },
     imageAssetPlan: requestedAssets.map(({ prompt: _prompt, ...asset }) => asset),
-    visualSpec: designPlan,
+    visualSpec: { designPlan, structuralContract },
     designTokens: designPlan.tokens,
-    componentSpec: { rootIds: designPlan.rootIds, components: designPlan.components },
+    componentSpec: { structuralRoots: input.componentPlan?.structuralRoots || [], sections: input.componentPlan?.sections || [], repeatedGroups: input.componentPlan?.repeatedGroups || [] },
     registryPlan,
     tokenCssVariables: cssVariables,
     assets: assetResult.generatedAssets.map(({ dataUrl: _dataUrl, ...asset }) => asset),
