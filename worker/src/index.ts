@@ -155,7 +155,7 @@ async function analyze(target: string, env: Env, qualityRequested: boolean, user
   const browser = await launch(env.BROWSER);
   try {
     const context = await browser.newContext({
-      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/142 Safari/537.36 GetSetGo/0.9',
+      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/142 Safari/537.36 GetSetGo/1.0',
     });
     const page = await context.newPage();
     const breakpoints: Record<string, Signal> = {};
@@ -244,8 +244,8 @@ async function analyze(target: string, env: Env, qualityRequested: boolean, user
     const criticPassed = Boolean(critic && critic.verdict === 'pass' && Number(critic.score) >= QUALITY_THRESHOLD);
     const generatedPreview = quality?.generated?.previewHtml
       ? {
-          version: '0.9.0',
-          mode: criticPassed ? 'ai-verified-preview' : critic ? 'ai-iterated-preview' : 'ai-quality-preview',
+          version: '1.0.0',
+          mode: criticPassed ? 'guardrailed-verified-preview' : critic ? 'guardrailed-iterated-preview' : 'guardrailed-preview',
           html: quality.generated.previewHtml,
           sandboxRecommended: true,
           aiCalls: quality.aiCalls,
@@ -257,12 +257,12 @@ async function analyze(target: string, env: Env, qualityRequested: boolean, user
     const instructionCount = (userInstructions.main ? 1 : 0) + userInstructions.steps.length;
 
     return {
-      version: '0.9.0',
+      version: '1.0.0',
       target,
       generatedAt: new Date().toISOString(),
       policy: {
         qualityRequested,
-        qualityMode: quality ? 'ai-quality-first' : 'deterministic-fallback',
+        qualityMode: quality ? 'guardrailed-reconstruction' : 'deterministic-fallback',
         aiConfigured: configured,
         aiCalls: quality?.aiCalls || 0,
         provider: quality?.provider || selected?.provider || null,
@@ -275,12 +275,17 @@ async function analyze(target: string, env: Env, qualityRequested: boolean, user
         qualityGate: criticPassed ? 'pass' : critic ? 'needs-improvement' : quality ? 'critic-unavailable' : 'not-run',
         instructionCount,
         instructionSteps: userInstructions.steps.length,
+        designContract: quality ? 'tokens+component-spec+registry-routing' : null,
         rawDomReturned: false,
         screenshotEmbeddedInResponse: false,
       },
       breakpoints,
       designIR,
       componentPlan,
+      designTokens: quality?.designTokens || null,
+      componentSpec: quality?.componentSpec || null,
+      registryPlan: quality?.registryPlan || null,
+      tokenCssVariables: quality?.tokenCssVariables || null,
       generatedPreview,
       visualSpec: quality?.visualSpec || null,
       generatedAssets: quality?.assets || [],
@@ -319,7 +324,10 @@ export default {
         ok: true,
         service: 'get-set-go-api',
         browser: 'cloudflare-browser-run',
-        pipeline: 'prompt-aware reconstruction + rich scene evidence + iterative critic v0.9',
+        pipeline: 'guardrailed design contracts + component registry + iterative critic v1.0',
+        architecture: 'Phase B',
+        designContract: 'tokens+component-spec+registry-routing',
+        registryTiers: ['strict', 'parametric', 'escape'],
         aiConfigured: configured,
         provider: selected?.provider || null,
         model: selected?.model || null,
