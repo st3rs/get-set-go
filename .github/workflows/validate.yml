@@ -2,7 +2,7 @@ name: Validate Get Set Go
 
 on:
   push:
-    branches: [main]
+    branches: [main, minimal-slice-v1]
   pull_request:
     branches: [main]
 
