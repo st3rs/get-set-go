@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react'
+import React, { useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import './styles.css'
 import './prompt.css'
@@ -29,14 +29,23 @@ type Analysis = {
 }
 
 const features = [
-  ['01', 'Rendered evidence', 'Captures the page the way a visitor sees it, not just the DOM tree.'],
-  ['02', 'Responsive geometry', 'Measures desktop, tablet and mobile structure before generating code.'],
-  ['03', 'Design IR', 'Turns spacing, type, color and layout evidence into a reusable design model.'],
-  ['04', 'Visual architect', 'Muse Spark interprets composition and implementation intent from the evidence.'],
-  ['05', 'Product media', 'Muse Image can create realistic neutral media when a reconstruction needs it.'],
-  ['06', 'React + CSS', 'Produces editable interface code instead of a flattened screenshot.'],
-  ['07', 'Visual critic', 'Renders the result, compares it with the reference and corrects weak passes.'],
-  ['08', 'Quality gate', 'A reconstruction must earn the score instead of being declared finished by default.'],
+  ['01', 'Rendered page capture', 'Studies the page the way a visitor sees it, including visual hierarchy and media.'],
+  ['02', 'Responsive layout', 'Measures desktop, tablet and mobile structure before rebuilding the interface.'],
+  ['03', 'Design rules', 'Extracts reusable spacing, typography, color and layout patterns from the reference.'],
+  ['04', 'Layout planning', 'Turns the reference and your instructions into a concrete implementation plan.'],
+  ['05', 'Product imagery', 'Creates believable neutral mock media when product-heavy layouts need strong visuals.'],
+  ['06', 'Editable code', 'Produces React and CSS you can keep working with instead of flattening the result into an image.'],
+  ['07', 'Visual comparison', 'Renders the result and compares it with the reference to find visible mismatches.'],
+  ['08', 'Quality checks', 'Weak drafts can be corrected again instead of being declared finished automatically.'],
+]
+
+const promptSuggestions = [
+  ['Match closely', 'Match the reference layout, hierarchy, spacing, typography scale, and responsive behavior as closely as possible. Preserve its overall visual character.'],
+  ['Modernize the style', 'Keep the information architecture and content density, but modernize the visual styling with cleaner spacing, stronger hierarchy, and more polished interaction details.'],
+  ['Improve product cards', 'Keep the marketplace structure, but make the product cards feel more premium. Use strong realistic product or digital-product imagery, clearer hierarchy, and more consistent card spacing.'],
+  ['Simplify the header', 'Simplify the header and navigation while keeping the important actions easy to find. Reduce clutter without losing useful information.'],
+  ['Mobile-first cleanup', 'Prioritize mobile usability. Improve stacking, tap targets, spacing, typography, and responsive card behavior while keeping the desktop layout strong.'],
+  ['Premium SaaS look', 'Rework the visual language toward a mature premium SaaS product: restrained color, crisp typography, subtle borders, purposeful spacing, and polished interaction states.'],
 ]
 
 const audiences = [
@@ -47,11 +56,11 @@ const audiences = [
 ]
 
 const faqs = [
-  ['Does Get Set Go copy the source code?', 'No. It reconstructs from rendered browser evidence, measured geometry and design reasoning.'],
+  ['Does Get Set Go copy the source code?', 'No. It rebuilds from the rendered page, measured layout and your instructions rather than copying the original source code.'],
   ['Can I tell it what to change from the reference?', 'Yes. Use the main prompt for the goal and add instruction steps when the work needs an explicit sequence.'],
   ['Is the result just an image?', 'No. The target output is editable React and CSS, with a live generated preview.'],
-  ['What happens when the first result is weak?', 'The visual critic renders the draft, compares it against the reference and can revise it across multiple passes.'],
-  ['Can it handle product cards and media?', 'Yes. Product-heavy interfaces can use generated neutral mock media so cards do not collapse into empty placeholders.'],
+  ['What happens when the first result is weak?', 'Get Set Go renders the draft, compares it with the reference and can revise visible problems across multiple passes.'],
+  ['Can it handle product cards and media?', 'Yes. Product-heavy interfaces can use realistic neutral mock media so cards do not collapse into empty placeholders.'],
 ]
 
 function App() {
@@ -63,7 +72,7 @@ function App() {
   const [result, setResult] = useState<Analysis | null>(null)
 
   function addInstructionStep() {
-    setSteps((current) => [...current, ''])
+    setSteps((current) => current.length >= 8 ? current : [...current, ''])
   }
 
   function updateInstructionStep(index: number, value: string) {
@@ -72,6 +81,10 @@ function App() {
 
   function removeInstructionStep(index: number) {
     setSteps((current) => current.filter((_, stepIndex) => stepIndex !== index))
+  }
+
+  function applyPromptSuggestion(suggestion: string) {
+    setPrompt((current) => current.trim() ? `${current.trim()}\n\n${suggestion}` : suggestion)
   }
 
   async function submit(e: React.FormEvent) {
@@ -107,7 +120,7 @@ function App() {
       setResult(data)
 
       if (data.policy?.qualityMode === 'ai-quality-first') setStatus('Reconstruction ready')
-      else if (!data.policy?.aiConfigured) setStatus('Browser analysis ready · AI quality pass unavailable')
+      else if (!data.policy?.aiConfigured) setStatus('Page analysis ready · Advanced rebuild unavailable')
       else if (data.qualityError) setStatus('Fallback reconstruction ready')
       else setStatus('Reconstruction ready')
     } catch (error) {
@@ -122,15 +135,9 @@ function App() {
   const preview = result?.generatedPreview
   const score = result?.visualCritic?.score
 
-  const metrics = useMemo(() => [
-    [desktop?.visibleElementCount ? desktop.visibleElementCount.toLocaleString() : '3 views', 'rendered evidence'],
-    [typeof score === 'number' ? `${score}/100` : '92+', 'quality target'],
-    [result?.policy?.aiCalls ? `${result.policy.aiCalls}` : '3×', 'critic loop'],
-  ], [desktop, score, result])
-
   return (
     <div className="page">
-      <div className="announcement">Visual reconstruction is live · Browser Run + Muse Spark + Muse Image</div>
+      <div className="announcement">Build from a reference · Guide it with prompts · Refine the result</div>
 
       <header className="siteNav wrap">
         <a className="brand" href="#top"><span className="logoMark">G</span><span>Get Set Go</span></a>
@@ -146,7 +153,7 @@ function App() {
         <section className="heroSection">
           <div className="heroGlow" />
           <div className="heroInner wrap">
-            <p className="kicker">VISUAL ARCHITECT FOR THE WEB</p>
+            <p className="kicker">AI WEBSITE RECONSTRUCTION</p>
             <h1>Turn a reference website into working interface code.</h1>
             <p className="heroCopy">Give Get Set Go a reference, then tell it what you actually want. Use one main prompt or break a complex build into ordered instruction steps.</p>
 
@@ -173,13 +180,21 @@ function App() {
                   aria-label="Main prompt"
                   placeholder="Example: Rebuild this marketplace with a cleaner premium layout. Keep the information density and category structure, but make product cards more modern, use realistic digital-product thumbnails, and simplify the header."
                 />
+                <div className="suggestionBlock">
+                  <span className="suggestionLabel">Prompt suggestions</span>
+                  <div className="suggestionChips">
+                    {promptSuggestions.map(([label, suggestion]) => (
+                      <button type="button" key={label} onClick={() => applyPromptSuggestion(suggestion)} disabled={busy}>{label}</button>
+                    ))}
+                  </div>
+                </div>
                 <div className="promptMeta"><span>Main instruction</span><span>{prompt.length.toLocaleString()} characters</span></div>
               </section>
 
               {steps.map((step, index) => (
                 <section className="promptPanel stepPromptPanel" key={`step-${index}`}>
                   <div className="composerTopline">
-                    <div><span className="composerLabel">Instruction step {index + 1}</span><small>Executed as an ordered instruction after the main prompt.</small></div>
+                    <div><span className="composerLabel">Instruction step {index + 1}</span><small>Applied in order after the main prompt.</small></div>
                     <button type="button" className="removeStep" onClick={() => removeInstructionStep(index)} disabled={busy} aria-label={`Remove instruction step ${index + 1}`}>Remove</button>
                   </div>
                   <textarea
@@ -194,19 +209,13 @@ function App() {
               ))}
 
               <div className="composerActions">
-                <button type="button" className="addStepButton" onClick={addInstructionStep} disabled={busy}><span>+</span> Add instruction step</button>
+                <button type="button" className="addStepButton" onClick={addInstructionStep} disabled={busy || steps.length >= 8}><span>+</span> {steps.length >= 8 ? '8 steps added' : 'Add instruction step'}</button>
                 <button type="submit" className="reconstructButton" disabled={busy}>{busy ? 'Reconstructing…' : 'Reconstruct'}</button>
               </div>
-              <div className="composerHints"><span>Reference evidence</span><b>→</b><span>Main prompt</span>{steps.length > 0 && <><b>→</b><span>{steps.length} instruction {steps.length === 1 ? 'step' : 'steps'}</span></>}<b>→</b><span>React + visual QA</span></div>
+              <div className="composerHints"><span>Reference</span><b>→</b><span>Your prompt</span>{steps.length > 0 && <><b>→</b><span>{steps.length} ordered {steps.length === 1 ? 'step' : 'steps'}</span></>}<b>→</b><span>Editable result</span></div>
             </form>
 
             <div className="statusLine"><span className={busy ? 'pulseDot active' : 'pulseDot'} />{status}</div>
-          </div>
-        </section>
-
-        <section className="metricsBand">
-          <div className="metricGrid wrap">
-            {metrics.map(([value, label]) => <div className="metric" key={label}><strong>{value}</strong><span>{label}</span></div>)}
           </div>
         </section>
 
@@ -214,7 +223,7 @@ function App() {
           <p className="kicker">REFERENCE + INSTRUCTIONS</p>
           <h2>Study the reference. Follow the brief. Prove the result.</h2>
           <p className="sectionCopy">The reference supplies visual evidence. Your prompt supplies intent. Ordered steps let you turn a complicated redesign into a build plan instead of one giant ambiguous request.</p>
-          <div className="modeTabs"><span className="active">1 · Capture</span><span>2 · Instruct</span><span>3 · Reconstruct</span><span>4 · Critique</span></div>
+          <div className="modeTabs"><span className="active">1 · Capture</span><span>2 · Instruct</span><span>3 · Rebuild</span><span>4 · Refine</span></div>
 
           <div className="productDemo">
             <div className="demoBar"><i /><i /><i /><span>get-set-go.pages.dev</span><b>Quality mode</b></div>
@@ -222,7 +231,7 @@ function App() {
               <aside className="demoAside">
                 <small>REFERENCE</small>
                 <strong>{result?.target || 'https://codecanyon.net'}</strong>
-                {['Browser capture', 'User instructions', 'Design scene graph', 'Visual architect', 'React generation', 'Visual critic'].map((item, index) => (
+                {['Capture reference', 'Read instructions', 'Map the layout', 'Build interface', 'Render preview', 'Compare & refine'].map((item, index) => (
                   <div className="demoStep" key={item}><span>{String(index + 1).padStart(2, '0')}</span><p>{item}</p><em>{index < 3 || result ? 'done' : 'ready'}</em></div>
                 ))}
               </aside>
@@ -232,7 +241,7 @@ function App() {
                 ) : (
                   <div className="emptyPreview">
                     <div className="fakeNav"><span /><span /><span /></div>
-                    <div className="fakeHero"><small>Generated preview</small><h3>Your reconstruction appears here.</h3><p>Add a reference and optional instructions above to run the full quality pipeline.</p><button type="button" onClick={() => document.getElementById('reconstruct')?.scrollIntoView({ behavior: 'smooth' })}>Start a reconstruction</button></div>
+                    <div className="fakeHero"><small>Generated preview</small><h3>Your reconstruction appears here.</h3><p>Add a reference and optional instructions above to run the full rebuild.</p><button type="button" onClick={() => document.getElementById('reconstruct')?.scrollIntoView({ behavior: 'smooth' })}>Start a reconstruction</button></div>
                     <div className="fakeCards"><i /><i /><i /></div>
                   </div>
                 )}
@@ -243,11 +252,11 @@ function App() {
 
         {result && (
           <section className="runSection wrap">
-            <div className="runHeader"><div><p className="kicker">CURRENT RUN</p><h2>{status}</h2></div><div className="scoreChip">{typeof score === 'number' ? `Critic ${score}/100` : result.policy?.qualityGate || 'Processed'}</div></div>
+            <div className="runHeader"><div><p className="kicker">CURRENT RUN</p><h2>{status}</h2></div><div className="scoreChip">{typeof score === 'number' ? `Quality ${score}/100` : result.policy?.qualityGate || 'Processed'}</div></div>
             <div className="runMetrics">
-              <div><span>Title</span><strong>{desktop?.title || 'Untitled'}</strong></div>
-              <div><span>Scene</span><strong>{ir ? `${ir.siteType} · ${ir.layout?.density}` : 'Analyzed'}</strong></div>
-              <div><span>AI calls</span><strong>{result.policy?.aiCalls ?? 0}</strong></div>
+              <div><span>Page</span><strong>{desktop?.title || 'Untitled'}</strong></div>
+              <div><span>Layout type</span><strong>{ir ? `${ir.siteType} · ${ir.layout?.density}` : 'Analyzed'}</strong></div>
+              <div><span>Quality status</span><strong>{result.policy?.qualityGate || 'Processed'}</strong></div>
               <div><span>Generated media</span><strong>{result.policy?.imageAssetsGenerated ?? 0}</strong></div>
             </div>
             {(result.qualityError || result.criticError) && <div className="warningBox">{result.qualityError || result.criticError}</div>}
@@ -256,7 +265,7 @@ function App() {
         )}
 
         <section id="quality" className="section wrap splitIntro">
-          <div><p className="kicker">EVIDENCE FIRST</p><h2>Less guessing. More measured interface structure.</h2><p className="sectionCopy left">The browser layer extracts what the model should not have to invent: geometry, responsive behavior, typography, media footprint and layout relationships.</p></div>
+          <div><p className="kicker">MEASURE BEFORE BUILDING</p><h2>Less guessing. More measured interface structure.</h2><p className="sectionCopy left">Get Set Go measures the rendered page first, so layout, typography, media and responsive behavior do not have to be invented from scratch.</p></div>
           <div className="featureGrid">
             {features.map(([num, title, copy]) => <article className="featureCard" key={title}><span>{num}</span><h3>{title}</h3><p>{copy}</p></article>)}
           </div>
@@ -278,12 +287,12 @@ function App() {
 
         <section className="softSection proofSection">
           <div className="section wrap centerSection compact">
-            <p className="kicker">QUALITY OVER THEATER</p>
+            <p className="kicker">QUALITY WITH CONTEXT</p>
             <h2>The engine is allowed to say “not good enough yet.”</h2>
             <div className="proofGrid">
-              <article><strong>92+</strong><h3>Visual quality gate</h3><p>The critic should not pass a reconstruction simply because generation completed.</p></article>
+              <article><strong>92+</strong><h3>Quality target</h3><p>A draft should meet a high visual bar before it is treated as complete.</p></article>
               <article><strong>3</strong><h3>Correction passes</h3><p>Weak output can be rendered and corrected again instead of stopping at the first draft.</p></article>
-              <article><strong>3</strong><h3>Viewport classes</h3><p>Desktop, tablet and mobile evidence are considered before the interface is generated.</p></article>
+              <article><strong>3</strong><h3>Screen sizes checked</h3><p>Desktop, tablet and mobile layouts are considered before the interface is generated.</p></article>
             </div>
           </div>
         </section>
@@ -301,7 +310,7 @@ function App() {
         </section>
       </main>
 
-      <footer className="footer wrap"><a className="brand" href="#top"><span className="logoMark">G</span><span>Get Set Go</span></a><p>Reference evidence → Instructions → Design IR → React → Critic</p><span>Built for editable output.</span></footer>
+      <footer className="footer wrap"><a className="brand" href="#top"><span className="logoMark">G</span><span>Get Set Go</span></a><p>Reference → Instructions → Rebuild → Refine</p><span>Built for editable output.</span></footer>
     </div>
   )
 }
