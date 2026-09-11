@@ -5,13 +5,13 @@ This document deliberately separates model functionality from deployment plumbin
 | Proof | What it proves | Required artifact | Current status |
 | --- | --- | --- | --- |
 | Direct Meta Spark control | The raw `MODEL_API_KEY` can call `muse-spark-1.3` without Cloudflare | `artifacts/meta-model-proof/<timestamp>/spark/proof.json` plus raw response | UNPROVEN |
-| Direct Meta Muse Image access | The same raw key can call `muse-image-1.0` on the same Meta Responses surface and return recognized image bytes | `artifacts/meta-model-proof/<timestamp>/image/proof.json` plus real image file | UNPROVEN |
+| Direct Meta Muse Image access | The same raw key can call `muse-image-1.0` on the same Meta Responses surface, return recognized nonzero image bytes, and produce a visually openable image | `artifacts/meta-model-proof/<timestamp>/image/proof.json` plus real image file opened manually and visually confirmed | UNPROVEN |
 | Direct two-model interpretation | Spark and Image results can be interpreted without conflating request, auth, entitlement, geo, or model-surface failures | `artifacts/meta-model-proof/<timestamp>/summary.json` | UNPROVEN |
-| Cloudflare Muse Image plumbing | Worker deployment, secret binding, routing, and response parsing work | Production `/api/smoke-image` response with image bytes | UNPROVEN |
 | Direct/local Browser capture | Browser capture works outside the production orchestration path | Saved screenshot plus capture metadata | UNPROVEN |
 | Direct/local Spark structure | `muse-spark-1.3` returns JSON that parses against the minimal contract | Saved raw Spark response plus parsed JSON | UNPROVEN |
 | Direct/local output injection | Generated image bytes are actually embedded in `output.html` | Saved `output.html` opened/rendered with the generated image visible | UNPROVEN |
 | Local end-to-end minimal slice | Browser → Spark → Muse Image → HTML completes without Cloudflare edge timing | Complete local artifact directory | UNPROVEN |
+| Cloudflare Muse Image plumbing | Worker deployment, secret binding, routing, and response parsing work | Production `/api/smoke-image` response with image bytes | UNPROVEN |
 | Production minimal slice | The already-proven local slice also survives production routing/time limits | Production response plus rendered output | UNPROVEN |
 
 ## Direct proof command
@@ -66,7 +66,7 @@ Do not merge 403 and 404.
 
 ## Interpretation matrix
 
-- Spark PASS + Image PASS: Meta direct two-model path is proven. Proceed to the local full slice.
+- Spark PASS + Image PASS: Meta direct two-model path is proven only after the image file is opened manually and the expected generated image is visibly intact. Magic bytes and nonzero byte length alone are insufficient. After that, proceed next to **Direct/local Browser capture**, not Cloudflare plumbing.
 - Spark PASS + Image 400: Muse Image request/surface contract is wrong. Inspect `image/raw-response.json`, fix only that request, and retry. Do not classify it as entitlement and do not switch providers yet.
 - Spark PASS + Image 403: Base key/Spark surface works; image-specific entitlement or policy is the leading explanation. Do not debug Cloudflare.
 - Spark PASS + Image 404: Keep Spark on Meta; move only Muse Image to a provider that explicitly serves it.
@@ -82,4 +82,4 @@ Do not merge 403 and 404.
 
 ## Rule
 
-Do not mark any row PASS without the required runtime artifact. CI/build success only means the code compiles or bundles. `/api/smoke-image` is Cloudflare plumbing evidence only and can never mark the direct Meta rows PASS.
+Do not mark any row PASS without the required runtime artifact. For Muse Image, PASS additionally requires opening the saved image file and visually confirming that it renders intact and matches the smoke prompt. CI/build success only means the code compiles or bundles. `/api/smoke-image` is Cloudflare plumbing evidence only and can never mark the direct Meta rows PASS.
