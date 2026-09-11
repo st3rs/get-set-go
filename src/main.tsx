@@ -1,7 +1,8 @@
-import React, { useState } from 'react'
+import React, { useEffect, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import './styles.css'
 import './prompt.css'
+import './job-progress.css'
 
 type Analysis = {
   target?: string
@@ -27,6 +28,28 @@ type Analysis = {
   error?: string
   action?: string
 }
+
+type JobStatus = {
+  id: string
+  status: 'queued' | 'running' | 'succeeded' | 'failed'
+  stage: string
+  progress: number
+  message?: string
+  error?: string
+  createdAt?: string
+  startedAt?: string
+  finishedAt?: string
+}
+
+type JobEnvelope = {
+  ok?: boolean
+  jobId?: string
+  job?: JobStatus
+  result?: Analysis | null
+  error?: string
+}
+
+const ACTIVE_JOB_KEY = 'get-set-go-active-job'
 
 const features = [
   ['01', 'Rendered page capture', 'Studies the page the way a visitor sees it, including visual hierarchy and media.'],
@@ -63,6 +86,17 @@ const faqs = [
   ['Can it handle product cards and media?', 'Yes. Product-heavy interfaces can use realistic neutral mock media so cards do not collapse into empty placeholders.'],
 ]
 
+const sleep = (ms: number) => new Promise((resolve) => window.setTimeout(resolve, ms))
+
+async function readJson(response: Response) {
+  const contentType = response.headers.get('content-type') || ''
+  const text = await response.text()
+  if (!contentType.includes('application/json')) throw new Error(`API returned ${contentType || 'non-JSON'} (HTTP ${response.status}).`)
+  const data = JSON.parse(text) as JobEnvelope
+  if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`)
+  return data
+}
+
 function App() {
   const [url, setUrl] = useState('https://codecanyon.net')
   const [prompt, setPrompt] = useState('')
@@ -70,6 +104,7 @@ function App() {
   const [status, setStatus] = useState('Ready for a reference')
   const [busy, setBusy] = useState(false)
   const [result, setResult] = useState<Analysis | null>(null)
+  const [jobProgress, setJobProgress] = useState<JobStatus | null>(null)
 
   function addInstructionStep() {
     setSteps((current) => current.length >= 8 ? current : [...current, ''])
@@ -87,9 +122,73 @@ function App() {
     setPrompt((current) => current.trim() ? `${current.trim()}\n\n${suggestion}` : suggestion)
   }
 
+  function finishWithResult(data: Analysis) {
+    setResult(data)
+    if (data.policy?.qualityMode === 'guardrailed-reconstruction') setStatus('Reconstruction ready')
+    else if (!data.policy?.aiConfigured) setStatus('Page analysis ready · Advanced rebuild unavailable')
+    else if (data.qualityError) setStatus('Fallback reconstruction ready')
+    else setStatus('Reconstruction ready')
+  }
+
+  async function pollJob(jobId: string, isCancelled: () => boolean = () => false) {
+    let transientFailures = 0
+
+    while (!isCancelled()) {
+      try {
+        const statusData = await readJson(await fetch(`/api/jobs/${jobId}`, { cache: 'no-store' }))
+        const job = statusData.job
+        if (!job) throw new Error('Background job returned no status')
+
+        transientFailures = 0
+        setJobProgress(job)
+        setStatus(job.message ? `${job.stage} · ${job.message}` : job.stage)
+
+        if (job.status === 'failed') {
+          try { localStorage.removeItem(ACTIVE_JOB_KEY) } catch {}
+          throw new Error(job.error || 'Background reconstruction failed')
+        }
+
+        if (job.status === 'succeeded') {
+          const finalData = await readJson(await fetch(`/api/jobs/${jobId}?includeResult=1`, { cache: 'no-store' }))
+          if (!finalData.result) throw new Error('The job completed but its result could not be loaded')
+          try { localStorage.removeItem(ACTIVE_JOB_KEY) } catch {}
+          setJobProgress(finalData.job || job)
+          finishWithResult(finalData.result)
+          return
+        }
+      } catch (error) {
+        transientFailures += 1
+        if (transientFailures >= 5) throw error
+        setStatus('Background job is still running · reconnecting…')
+      }
+
+      await sleep(1500)
+    }
+  }
+
+  useEffect(() => {
+    let cancelled = false
+    let savedJobId = ''
+    try { savedJobId = localStorage.getItem(ACTIVE_JOB_KEY) || '' } catch {}
+    if (!savedJobId) return () => { cancelled = true }
+
+    setBusy(true)
+    setStatus('Resuming background reconstruction…')
+    pollJob(savedJobId, () => cancelled)
+      .catch((error) => {
+        if (!cancelled) setStatus(error instanceof Error ? error.message : 'Could not resume background job')
+      })
+      .finally(() => {
+        if (!cancelled) setBusy(false)
+      })
+
+    return () => { cancelled = true }
+  }, [])
+
   async function submit(e: React.FormEvent) {
     e.preventDefault()
     setResult(null)
+    setJobProgress(null)
     try {
       new URL(url)
     } catch {
@@ -98,10 +197,10 @@ function App() {
     }
 
     setBusy(true)
-    setStatus('Reading the reference and following your instructions…')
+    setStatus('Creating background reconstruction job…')
 
     try {
-      const response = await fetch('/api/analyze', {
+      const created = await readJson(await fetch('/api/jobs', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
@@ -110,21 +209,14 @@ function App() {
           prompt: prompt.trim(),
           steps: steps.map((step) => step.trim()).filter(Boolean),
         }),
-      })
-      const contentType = response.headers.get('content-type') || ''
-      const text = await response.text()
-      if (!contentType.includes('application/json')) throw new Error(`API returned ${contentType || 'non-JSON'} (HTTP ${response.status}).`)
+      }))
 
-      const data = JSON.parse(text) as Analysis
-      if (!response.ok) throw new Error(data.action ? `${data.error} ${data.action}` : data.error || `HTTP ${response.status}`)
-      setResult(data)
-
-      if (data.policy?.qualityMode === 'ai-quality-first') setStatus('Reconstruction ready')
-      else if (!data.policy?.aiConfigured) setStatus('Page analysis ready · Advanced rebuild unavailable')
-      else if (data.qualityError) setStatus('Fallback reconstruction ready')
-      else setStatus('Reconstruction ready')
+      if (!created.jobId) throw new Error('Background service did not return a job id')
+      try { localStorage.setItem(ACTIVE_JOB_KEY, created.jobId) } catch {}
+      setJobProgress({ id: created.jobId, status: 'queued', stage: 'Queued', progress: 0, message: 'Waiting for the background runner' })
+      await pollJob(created.jobId)
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : 'Analysis failed')
+      setStatus(error instanceof Error ? error.message : 'Reconstruction failed')
     } finally {
       setBusy(false)
     }
@@ -161,7 +253,7 @@ function App() {
               <section className="urlPanel">
                 <div className="composerTopline">
                   <div><span className="composerLabel">Reference URL</span><small>What should Get Set Go study?</small></div>
-                  <span className="inputState">{busy ? 'Reading reference' : 'Public http/https'}</span>
+                  <span className="inputState">{busy ? 'Background job active' : 'Public http/https'}</span>
                 </div>
                 <div className="referenceRow">
                   <input type="url" value={url} onChange={(e) => setUrl(e.target.value)} disabled={busy} aria-label="Reference URL" />
@@ -210,9 +302,17 @@ function App() {
 
               <div className="composerActions">
                 <button type="button" className="addStepButton" onClick={addInstructionStep} disabled={busy || steps.length >= 8}><span>+</span> {steps.length >= 8 ? '8 steps added' : 'Add instruction step'}</button>
-                <button type="submit" className="reconstructButton" disabled={busy}>{busy ? 'Reconstructing…' : 'Reconstruct'}</button>
+                <button type="submit" className="reconstructButton" disabled={busy}>{busy ? 'Running in background…' : 'Reconstruct'}</button>
               </div>
               <div className="composerHints"><span>Reference</span><b>→</b><span>Your prompt</span>{steps.length > 0 && <><b>→</b><span>{steps.length} ordered {steps.length === 1 ? 'step' : 'steps'}</span></>}<b>→</b><span>Editable result</span></div>
+
+              {jobProgress && busy && (
+                <div className="jobProgress" role="status" aria-live="polite">
+                  <div className="jobProgressTop"><strong>{jobProgress.stage}</strong><span>{Math.max(0, Math.min(100, jobProgress.progress))}%</span></div>
+                  <div className="jobProgressTrack"><i style={{ width: `${Math.max(0, Math.min(100, jobProgress.progress))}%` }} /></div>
+                  <p>{jobProgress.message || 'The job continues even if you refresh this page.'}</p>
+                </div>
+              )}
             </form>
 
             <div className="statusLine"><span className={busy ? 'pulseDot active' : 'pulseDot'} />{status}</div>
