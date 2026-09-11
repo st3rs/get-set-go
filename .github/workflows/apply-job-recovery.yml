@@ -1,0 +1,35 @@
+name: Apply Job Recovery Patch
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/apply_job_recovery_patch.py'
+      - '.github/workflows/apply-job-recovery.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Apply recovery patch
+        run: python scripts/apply_job_recovery_patch.py
+      - name: Commit patched runtime
+        run: |
+          if git diff --quiet; then
+            echo "No runtime changes required"
+            exit 0
+          fi
+          git config user.name "ST3R Recovery Bot"
+          git config user.email "143852127+st3rs@users.noreply.github.com"
+          git add worker/src/index.ts src/main.tsx
+          git commit -m "fix: recover stalled background reconstruction jobs"
+          git push origin HEAD:main
