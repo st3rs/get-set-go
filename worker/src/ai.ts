@@ -5,6 +5,13 @@ import {
   responsesRequest,
   type AiEnv,
 } from './ai-client';
+import {
+  DESIGN_PLAN_JSON_SCHEMA,
+  DesignPlanSchema,
+  resolveRegistryPlan,
+  tokensToCssVariables,
+  type DesignPlan,
+} from './guardrails';
 
 type ImageEvidence = {
   label: string;
@@ -12,61 +19,9 @@ type ImageEvidence = {
   detail?: 'low' | 'high' | 'auto';
 };
 
-type AssetRequest = {
-  id: string;
-  role: string;
-  prompt: string;
-  size: '1024x1024' | '1024x1536' | '1536x1024';
-  required: boolean;
-};
-
 type UserInstructions = {
   main: string;
   steps: string[];
-};
-
-const ARCHITECT_SCHEMA = {
-  type: 'object',
-  additionalProperties: false,
-  properties: {
-    summary: { type: 'string' },
-    designIntent: { type: 'string' },
-    layoutRules: { type: 'array', items: { type: 'string' } },
-    typographyRules: { type: 'array', items: { type: 'string' } },
-    colorRules: { type: 'array', items: { type: 'string' } },
-    componentRules: { type: 'array', items: { type: 'string' } },
-    responsiveRules: { type: 'array', items: { type: 'string' } },
-    mustMatch: { type: 'array', items: { type: 'string' } },
-    avoid: { type: 'array', items: { type: 'string' } },
-    assetRequests: {
-      type: 'array',
-      maxItems: 8,
-      items: {
-        type: 'object',
-        additionalProperties: false,
-        properties: {
-          id: { type: 'string' },
-          role: { type: 'string' },
-          prompt: { type: 'string' },
-          size: { type: 'string', enum: ['1024x1024', '1024x1536', '1536x1024'] },
-          required: { type: 'boolean' },
-        },
-        required: ['id', 'role', 'prompt', 'size', 'required'],
-      },
-    },
-  },
-  required: [
-    'summary',
-    'designIntent',
-    'layoutRules',
-    'typographyRules',
-    'colorRules',
-    'componentRules',
-    'responsiveRules',
-    'mustMatch',
-    'avoid',
-    'assetRequests',
-  ],
 };
 
 const CODEGEN_SCHEMA = {
@@ -117,12 +72,64 @@ function instructionText(instructions?: UserInstructions) {
   const main = instructions.main?.trim();
   const steps = (instructions.steps || []).map((step) => step.trim()).filter(Boolean);
   if (!main && !steps.length) return 'No user customization instructions were supplied. Reconstruct the reference as faithfully as possible.';
-  const lines = [
+  return [
     'USER CUSTOMIZATION INSTRUCTIONS:',
     main ? `Main prompt: ${main}` : 'Main prompt: none',
     ...steps.map((step, index) => `Instruction step ${index + 1}: ${step}`),
+  ].join('\n');
+}
+
+function cssVariableBlock(vars: Record<string, string>) {
+  return `:root {\n${Object.entries(vars).map(([key, value]) => `  ${key}: ${value};`).join('\n')}\n}`;
+}
+
+async function resolveDesignPlan(
+  env: AiEnv,
+  input: {
+    target: string;
+    designIR: any;
+    componentPlan: any;
+    semanticEvidence: any;
+    images: ImageEvidence[];
+    userInstructions?: UserInstructions;
+  },
+) {
+  const instructions = instructionText(input.userInstructions);
+  const digitalMarketplace = isDigitalMarketplace(input);
+  const content: any[] = [
+    {
+      type: 'input_text',
+      text: `You are the Phase B Design Token Resolver and Component Spec Planner for a high-fidelity website reconstruction engine.\n\nYou are NOT the code generator. Your only output is the strict DesignPlan JSON contract supplied by the response schema.\n\nMODE:\n- This request is reconstruction mode because a visual reference URL is supplied. Set mode=reconstruction.\n- Explicit user instructions have highest priority for aspects they intentionally change.\n- For all other aspects, measured browser geometry and screenshots are the visual truth.\n\n${instructions}\n\nTARGET: ${input.target}\n\nMEASURED DESIGN IR:\n${compactJson(input.designIR, 26000)}\n\nEXISTING STRUCTURAL HINTS:\n${compactJson(input.componentPlan, 10000)}\n\nSEMANTIC + GEOMETRY EVIDENCE:\n${compactJson(input.semanticEvidence, 18000)}\n\nTOKEN RESOLUTION CONTRACT:\n- Resolve one semantic token system before defining components.\n- Normalize colors by role: background, surface, elevated surface, text, muted text, border, accent, accent foreground, danger.\n- Derive typography scale, line-height pairings and weights from measured evidence.\n- Resolve a compact spacing rhythm and reusable geometry/elevation/motion tokens.\n- In reconstruction mode, measured values may become token values even if they do not fit an 8pt creation-mode scale. Do not flatten a distinctive reference into generic SaaS defaults.\n\nSTRUCTURAL COMPONENT CONTRACT:\n- Return a flat component graph. rootIds define top-level page order. components reference child component ids.\n- Use strict primitives for behavior-heavy basics such as buttons, inputs, tabs, dialogs, accordion and navigation when possible.\n- Use parametric components for heroes, cards, product cards, grids, sidebars, pricing, tables, testimonials, headers and footers when the reference can be represented through token-driven variants.\n- Request tierPreference=escape only when the reference or explicit user instruction truly requires behavior/geometry outside the registry, such as asymmetric overlap, SVG-driven art, canvas/WebGL, unusually composed editorial layouts, or other evidence-backed custom structures.\n- Every escape request MUST provide a concrete escapeReason tied to visible evidence or a user instruction. Otherwise use strict or parametric.\n- Preserve high-character references. Brutalist, editorial, high-density fintech, marketplace and other non-SaaS visual languages must not be normalized into a generic dashboard.\n\nPRODUCT MEDIA:\n- Good product media is mandatory when prominent product cards depend on imagery.\n- This target is ${digitalMarketplace ? 'likely a DIGITAL PRODUCT MARKETPLACE; prefer polished fictional software/template/plugin/app preview thumbnails' : 'not specifically classified as a digital marketplace from current evidence'}.\n- Never request copied proprietary screenshots, logos or trademarks. Neutral original mock media is allowed.\n- UI labels, prices, badges and copy stay in HTML, never baked into generated images.\n\nBuild a DesignPlan that a deterministic registry router and a separate code generator can execute without inventing the design system again.`,
+    },
   ];
-  return lines.join('\n');
+
+  for (const image of input.images) {
+    content.push({ type: 'input_text', text: `REFERENCE VISUAL: ${image.label}` });
+    content.push({ type: 'input_image', image_url: image.dataUrl, detail: image.detail || 'high' });
+  }
+
+  const response = await responsesRequest(env, 'architect', {
+    reasoning: { effort: 'high' },
+    input: [{ role: 'user', content }],
+    text: {
+      verbosity: 'medium',
+      format: {
+        type: 'json_schema',
+        name: 'guardrailed_design_plan',
+        strict: true,
+        schema: DESIGN_PLAN_JSON_SCHEMA,
+      },
+    },
+  });
+
+  const output = extractResponseText(response.payload);
+  if (!output) throw new Error('Design resolver returned no output');
+  const parsed = JSON.parse(output);
+  const plan = DesignPlanSchema.parse(parsed);
+  const registryPlan = resolveRegistryPlan(plan);
+  const cssVariables = tokensToCssVariables(plan.tokens);
+
+  return { plan, registryPlan, cssVariables, response };
 }
 
 export async function runQualityPipeline(
@@ -138,35 +145,12 @@ export async function runQualityPipeline(
 ) {
   const digitalMarketplace = isDigitalMarketplace(input);
   const instructions = instructionText(input.userInstructions);
-  const architectContent: any[] = [
-    {
-      type: 'input_text',
-      text: `You are the visual architect for a production-grade interface reconstruction engine.\n\nQUALITY BAR: The generated interface should be competitive with top visual website reconstruction tools. Optimize for visual fidelity, hierarchy, composition, typography, spacing, rhythm, section proportions, responsive intent, and implementation quality. Do not optimize merely for low token cost.\n\nREFERENCE VS USER INTENT:\n- Screenshots and measured evidence are the visual truth for aspects the user did NOT ask to change.\n- Explicit user customization instructions are intentional overrides. When they conflict with the reference, follow the user instruction for that aspect while preserving the reference's useful design relationships elsewhere.\n- Execute ordered instruction steps in sequence and make later steps compatible with earlier ones.\n- Do not quietly revert an explicitly requested change just because the reference differs.\n\n${instructions}\n\nTarget: ${input.target}\n\nDesign IR:\n${compactJson(input.designIR)}\n\nComponent plan:\n${compactJson(input.componentPlan)}\n\nSemantic evidence:\n${compactJson(input.semanticEvidence, 12000)}\n\nProduce precise implementation rules. Avoid generic SaaS-template advice.\n\nASSET POLICY:\n- For non-commerce interfaces, request Muse Image assets only when important hero/background/illustration media cannot be recreated well with HTML/CSS alone.\n- For commerce, catalog, marketplace, product-list, pricing-with-products, or any UI with product cards, GOOD PRODUCT MEDIA IS MANDATORY. Do not allow blank media blocks, abstract gray placeholders, emoji products, or generic CSS rectangles.\n- First determine the product medium from evidence and user instructions. Physical commerce should use believable commercial product photography. Digital marketplaces selling code, plugins, templates, apps, themes, SaaS or downloadable assets should use polished digital-product preview thumbnails, such as fictional dashboard/app UI previews, browser/device mockups, interface compositions, or editorial software preview art that matches the requested framing and visual language.\n- For digital products, do NOT invent physical boxes, gadgets, bottles, clothing, or studio product photography unless the user or reference clearly calls for them.\n- If original media cannot be reused safely, request original neutral mock media that matches framing, crop, palette, density, perspective, backdrop, and visual weight. The mock may be fictional, but it must look commercially credible.\n- Request separate product-card assets when cards visibly show different products. Prefer the requested/reference card aspect ratio.\n- Never render prices, labels, badges, UI copy, logos or trademarks into the generated image. Those belong in HTML.\n- Never request copied proprietary screenshots or media.\n- This target is classified as ${digitalMarketplace ? 'a likely DIGITAL PRODUCT MARKETPLACE' : 'not specifically a digital marketplace from current evidence'}.`,
-    },
-  ];
 
-  for (const image of input.images) {
-    architectContent.push({ type: 'input_text', text: `Visual evidence: ${image.label}` });
-    architectContent.push({ type: 'input_image', image_url: image.dataUrl, detail: image.detail || 'high' });
-  }
-
-  const architectResponse = await responsesRequest(env, 'architect', {
-    reasoning: { effort: 'high' },
-    input: [{ role: 'user', content: architectContent }],
-    text: {
-      verbosity: 'medium',
-      format: {
-        type: 'json_schema',
-        name: 'visual_architect_spec',
-        strict: true,
-        schema: ARCHITECT_SCHEMA,
-      },
-    },
-  });
-
-  const architectText = extractResponseText(architectResponse.payload);
-  if (!architectText) throw new Error('Visual architect returned no output');
-  const visualSpec = JSON.parse(architectText);
+  // Micro-step A: resolve semantic tokens + structural component graph.
+  const resolved = await resolveDesignPlan(env, input);
+  const designPlan: DesignPlan = resolved.plan;
+  const registryPlan = resolved.registryPlan;
+  const cssVariables = resolved.cssVariables;
 
   const generatedAssets: Array<{
     id: string;
@@ -177,56 +161,48 @@ export async function runQualityPipeline(
   }> = [];
   const assetErrors: string[] = [];
 
-  if (architectResponse.provider === 'meta' && env.MODEL_API_KEY) {
-    const requests = (Array.isArray(visualSpec.assetRequests) ? visualSpec.assetRequests : [])
-      .filter((asset: AssetRequest) => asset?.required)
+  if (resolved.response.provider === 'meta' && env.MODEL_API_KEY) {
+    const requests = designPlan.assetRequests
+      .filter((asset) => asset.required)
       .slice(0, maxAssetsForSite(input.designIR));
 
     for (let index = 0; index < requests.length; index++) {
-      const asset = requests[index] as AssetRequest;
+      const asset = requests[index];
       const id = safeAssetId(asset.id, index);
       const isProduct = /product|catalog|card|merch|item|thumbnail|listing/i.test(`${asset.role} ${id}`);
       try {
         const imageResponse = await museImageRequest(env, {
           input: isProduct && digitalMarketplace
-            ? `Create one polished digital-product marketplace preview thumbnail for a premium product card. Role: ${asset.role}. ${asset.prompt}\n\nThe listed product is digital, such as software, source code, a plugin, template, theme, SaaS, mobile app, web app, or developer tool. Create a commercially credible fictional preview using clean interface compositions, dashboard/app screens, browser or device mockups, abstract technical visualization, or layered UI panels as appropriate to the prompt and requested visual language. Match the requested crop, perspective, palette, density, backdrop, and visual weight. No legible text, prices, labels, logos, trademarks, watermarks, marketplace chrome, or copied real product screenshots. Do not depict physical retail products unless explicitly required.`
+            ? `Create one polished digital-product marketplace preview thumbnail for a premium product card. Role: ${asset.role}. ${asset.prompt}\n\nThe listed product is digital, such as software, source code, a plugin, template, theme, SaaS, mobile app, web app, or developer tool. Create a commercially credible fictional preview using clean interface compositions, dashboard/app screens, browser or device mockups, abstract technical visualization, or layered UI panels as appropriate. Match the requested crop, perspective, palette, density, backdrop, and visual weight. No legible text, prices, labels, logos, trademarks, watermarks, marketplace chrome, or copied real product screenshots.`
             : isProduct
-              ? `Create a single realistic commercial product photograph for a premium web product card. Role: ${asset.role}. ${asset.prompt}\n\nThe product may be fictional, but it must look physically believable, professionally photographed, and ready for an e-commerce card. Match the requested camera angle, crop, lighting, materials, backdrop, palette, and negative space. Keep one clear product subject. No text, prices, labels, logos, trademarks, watermarks, UI, collage, frame, or border inside the image.`
-              : `Create one original visual asset for a web interface reconstruction. Role: ${asset.role}. ${asset.prompt}\n\nDo not include brand logos, trademarks, legible UI text, watermarks, or copied proprietary imagery. Match the requested composition, palette, lighting and visual weight while remaining an original neutral asset.`,
+              ? `Create a single realistic commercial product photograph for a premium web product card. Role: ${asset.role}. ${asset.prompt}\n\nThe product may be fictional, but it must look physically believable and professionally photographed. Match the requested angle, crop, lighting, materials, backdrop, palette, and negative space. No text, prices, labels, logos, trademarks, watermarks, UI, collage, frame, or border inside the image.`
+              : `Create one original visual asset for a web interface reconstruction. Role: ${asset.role}. ${asset.prompt}\n\nDo not include brand logos, trademarks, legible UI text, watermarks, or copied proprietary imagery. Match the requested composition, palette and visual weight while remaining original.`,
           tools: [{ type: 'image_generation', size: asset.size }],
         });
         const base64 = extractMuseImageBase64(imageResponse.payload);
         if (!base64) throw new Error('Muse Image returned no image_generation_call result');
-        generatedAssets.push({
-          id,
-          role: asset.role,
-          size: asset.size,
-          model: imageResponse.model,
-          dataUrl: `data:image/png;base64,${base64}`,
-        });
+        generatedAssets.push({ id, role: asset.role, size: asset.size, model: imageResponse.model, dataUrl: `data:image/png;base64,${base64}` });
       } catch (error) {
-        assetErrors.push(`${id}: ${error instanceof Error ? error.message : 'Muse Image failed'}`);
+        assetErrors.push(`${id}: ${error instanceof Error ? error.message : 'Image generation failed'}`);
       }
     }
   }
 
+  // Micro-step B: codegen receives an already-resolved design system and registry route.
   const codegenContent: any[] = [
     {
       type: 'input_text',
-      text: `You are the senior frontend implementation pass. Build a high-fidelity reconstruction from the supplied visual specification and evidence.\n\n${instructions}\n\nIMPORTANT: Explicit user customization instructions override the reference only for the aspects they address. Preserve measured reference fidelity everywhere else. Execute instruction steps in order.\n\nTarget: ${input.target}\n\nVisual specification:\n${compactJson(visualSpec, 30000)}\n\nDesign IR:\n${compactJson(input.designIR, 22000)}\n\nComponent plan:\n${compactJson(input.componentPlan, 14000)}\n\nRequirements:\n- Return production-quality React TSX and CSS, not pseudo-code.\n- Also return a completely self-contained previewHtml with inline CSS and no external scripts.\n- Match measured composition, spacing, typography scale, density, borders, radii, media aspect ratios, and responsive layout as closely as evidence and user intent require.\n- Use semantic HTML and responsive CSS.\n- Do not use generic gradients or decorative effects unless clearly supported by the reference or explicitly requested.\n- Do not include remote third-party scripts, tracking, forms that submit externally, or copied proprietary assets.\n- Prefer visual fidelity and instruction compliance over minimizing code length.\n- previewHtml must render standalone inside a sandboxed iframe.\n- For every generated Muse Image asset shown below, reference it with the exact marker {{ASSET:asset-id}} as an img src or CSS url. Do not invent other asset markers.\n- PRODUCT CARD RULE: if the reference or user instruction contains product cards, every prominent visible card must have a believable media area with the requested/reference approximate aspect ratio and crop. Use supplied product assets. Do not substitute empty rectangles, gradients, emoji, icons, or abstract placeholders. Use object-fit/object-position intentionally. Product copy, price, badges and CTA must stay as HTML, not baked into images.\n- DIGITAL MARKETPLACE RULE: for targets like CodeCanyon/Envato or other software/template/plugin marketplaces, product card imagery should look like professional digital-product preview thumbnails or app/UI mockups, not physical product photography, unless the user explicitly asks otherwise.`,
+      text: `You are the target React code generator for a guardrailed design engine. The design decisions have ALREADY been made. Do not invent a second design system.\n\n${instructions}\n\nTARGET: ${input.target}\n\nDESIGN PLAN (single source of truth):\n${compactJson(designPlan, 36000)}\n\nDETERMINISTIC COMPONENT REGISTRY ROUTING:\n${compactJson(registryPlan, 26000)}\n\nSEMANTIC CSS VARIABLES:\n${cssVariableBlock(cssVariables)}\n\nCODEGEN RULES:\n- Return production-quality React TSX and CSS plus a completely self-contained previewHtml with inline CSS and no external scripts.\n- Component hierarchy, order, responsive behavior, states and styling intent must follow DesignPlan.\n- Use the registry component name from the routing plan as the local React component contract. For this prototype, implement the registry contracts locally in App.tsx rather than importing unavailable packages.\n- STRICT tier: preserve semantic/accessibility behavior and do not introduce arbitrary visual styling inside the primitive.\n- PARAMETRIC tier: styling must come from semantic CSS variables and component parameters derived from the plan/reference.\n- ESCAPE tier: custom CSS or scoped arbitrary layout values are allowed ONLY for components routed to escape. Even there, color and typography must use semantic CSS variables.\n- Declare resolved semantic values once in :root. Outside :root, avoid raw hex/rgb/hsl colors. Use var(--color-*), var(--font-*), var(--space-*), var(--radius-*), var(--shadow-*), and var(--motion-*).\n- Do not normalize distinctive editorial, brutalist, dense fintech or marketplace geometry into generic rounded SaaS cards. Registry primitives are implementation tools, not a visual style.\n- Explicit user instructions remain intentional overrides. Preserve reference fidelity elsewhere.\n- Do not add gradients, glass effects, giant radii or decorative motion unless requested or supported by evidence.\n- For generated image assets shown below, reference the exact marker {{ASSET:asset-id}}.\n- Product card copy, prices, badges and CTA remain HTML.\n- previewHtml must be standalone, script-free and visually representative of App.tsx + styles.css.`,
     },
   ];
 
   for (const image of input.images) {
-    codegenContent.push({ type: 'input_text', text: `Reference image: ${image.label}` });
+    codegenContent.push({ type: 'input_text', text: `Reference image for fidelity check: ${image.label}` });
     codegenContent.push({ type: 'input_image', image_url: image.dataUrl, detail: image.detail || 'high' });
   }
 
   for (const asset of generatedAssets) {
-    codegenContent.push({
-      type: 'input_text',
-      text: `Muse Image asset id=${asset.id}, role=${asset.role}, size=${asset.size}. Use exact source marker {{ASSET:${asset.id}}}.`,
-    });
+    codegenContent.push({ type: 'input_text', text: `Generated asset id=${asset.id}, role=${asset.role}, size=${asset.size}. Use exact source marker {{ASSET:${asset.id}}}.` });
     codegenContent.push({ type: 'input_image', image_url: asset.dataUrl, detail: 'high' });
   }
 
@@ -237,7 +213,7 @@ export async function runQualityPipeline(
       verbosity: 'medium',
       format: {
         type: 'json_schema',
-        name: 'visual_codegen_output',
+        name: 'guardrailed_codegen_output',
         strict: true,
         schema: CODEGEN_SCHEMA,
       },
@@ -256,16 +232,23 @@ export async function runQualityPipeline(
   }
 
   return {
-    mode: 'quality-first',
-    provider: architectResponse.provider,
+    mode: 'guardrailed-reconstruction',
+    provider: resolved.response.provider,
     model: codegenResponse.model,
     models: {
-      architect: architectResponse.model,
+      resolver: resolved.response.model,
       codegen: codegenResponse.model,
       image: generatedAssets[0]?.model || null,
     },
     aiCalls: 2 + generatedAssets.length,
-    visualSpec,
+    visualSpec: designPlan,
+    designTokens: designPlan.tokens,
+    componentSpec: {
+      rootIds: designPlan.rootIds,
+      components: designPlan.components,
+    },
+    registryPlan,
+    tokenCssVariables: cssVariables,
     assets: generatedAssets.map(({ dataUrl: _dataUrl, ...asset }) => asset),
     assetErrors,
     generated,
