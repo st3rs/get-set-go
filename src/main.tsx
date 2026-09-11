@@ -39,6 +39,10 @@ type JobStatus = {
   createdAt?: string
   startedAt?: string
   finishedAt?: string
+  attempt?: number
+  heartbeatAt?: string
+  leaseExpiresAt?: number
+  deadlineAt?: number
 }
 
 type JobEnvelope = {
@@ -50,6 +54,15 @@ type JobEnvelope = {
 }
 
 const ACTIVE_JOB_KEY = 'get-set-go-active-job'
+const CLIENT_JOB_MAX_MS = 10 * 60 * 1000
+const CLIENT_HEARTBEAT_WARN_MS = 105 * 1000
+const CLIENT_HEARTBEAT_FAIL_MS = 3 * 60 * 1000
+
+class TerminalJobError extends Error {}
+
+function clearActiveJob() {
+  try { localStorage.removeItem(ACTIVE_JOB_KEY) } catch {}
+}
 
 const features = [
   ['01', 'Rendered page capture', 'Studies the page the way a visitor sees it, including visual hierarchy and media.'],
@@ -132,6 +145,7 @@ function App() {
 
   async function pollJob(jobId: string, isCancelled: () => boolean = () => false) {
     let transientFailures = 0
+    const clientStartedAt = Date.now()
 
     while (!isCancelled()) {
       try {
@@ -141,25 +155,53 @@ function App() {
 
         transientFailures = 0
         setJobProgress(job)
-        setStatus(job.message ? `${job.stage} · ${job.message}` : job.stage)
+
+        const createdAt = job.createdAt ? Date.parse(job.createdAt) : clientStartedAt
+        const hardDeadline = job.deadlineAt || ((Number.isFinite(createdAt) ? createdAt : clientStartedAt) + CLIENT_JOB_MAX_MS)
+        if (Date.now() > hardDeadline + 60_000) {
+          clearActiveJob()
+          throw new TerminalJobError('Background job exceeded its runtime limit and was stopped. Please start a fresh run.')
+        }
+
+        if (job.status === 'running' && job.heartbeatAt) {
+          const heartbeatAge = Date.now() - Date.parse(job.heartbeatAt)
+          if (Number.isFinite(heartbeatAge) && heartbeatAge > CLIENT_HEARTBEAT_FAIL_MS) {
+            clearActiveJob()
+            throw new TerminalJobError('Background runner stopped responding. The stuck job was cleared instead of polling forever.')
+          }
+          if (Number.isFinite(heartbeatAge) && heartbeatAge > CLIENT_HEARTBEAT_WARN_MS) {
+            setStatus('Runner heartbeat delayed · automatic recovery is starting…')
+          } else {
+            setStatus(job.message ? `${job.stage} · ${job.message}` : job.stage)
+          }
+        } else {
+          setStatus(job.message ? `${job.stage} · ${job.message}` : job.stage)
+        }
 
         if (job.status === 'failed') {
-          try { localStorage.removeItem(ACTIVE_JOB_KEY) } catch {}
-          throw new Error(job.error || 'Background reconstruction failed')
+          clearActiveJob()
+          throw new TerminalJobError(job.error || 'Background reconstruction failed')
         }
 
         if (job.status === 'succeeded') {
           const finalData = await readJson(await fetch(`/api/jobs/${jobId}?includeResult=1`, { cache: 'no-store' }))
-          if (!finalData.result) throw new Error('The job completed but its result could not be loaded')
-          try { localStorage.removeItem(ACTIVE_JOB_KEY) } catch {}
+          if (!finalData.result) {
+            clearActiveJob()
+            throw new TerminalJobError('The job completed but its result could not be loaded')
+          }
+          clearActiveJob()
           setJobProgress(finalData.job || job)
           finishWithResult(finalData.result)
           return
         }
       } catch (error) {
+        if (error instanceof TerminalJobError) throw error
         transientFailures += 1
-        if (transientFailures >= 5) throw error
-        setStatus('Background job is still running · reconnecting…')
+        if (transientFailures >= 5) {
+          clearActiveJob()
+          throw error
+        }
+        setStatus('Background service connection interrupted · reconnecting…')
       }
 
       await sleep(1500)

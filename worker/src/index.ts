@@ -26,6 +26,11 @@ type JobRecord = {
   finishedAt?: string;
   expiresAt?: number;
   error?: string;
+  attempt?: number;
+  heartbeatAt?: string;
+  leaseExpiresAt?: number;
+  deadlineAt?: number;
+  runToken?: string;
 };
 
 const VIEWPORTS = {
@@ -37,6 +42,10 @@ const VIEWPORTS = {
 const MAX_CRITIC_PASSES = 3;
 const MAX_INSTRUCTION_STEPS = 8;
 const JOB_TTL_MS = 24 * 60 * 60 * 1000;
+const JOB_HEARTBEAT_MS = 15_000;
+const JOB_LEASE_MS = 90_000;
+const JOB_HARD_TIMEOUT_MS = 8 * 60 * 1000;
+const MAX_JOB_ATTEMPTS = 2;
 const RESULT_CHUNK_CHARS = 48_000;
 
 function cors(env: Env) {
@@ -366,8 +375,38 @@ async function readLargeResult(storage: any) {
   return text ? JSON.parse(text) : null;
 }
 
+function isoMs(value?: string) {
+  if (!value) return 0;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function effectiveLeaseExpiry(job: JobRecord) {
+  if (job.leaseExpiresAt) return job.leaseExpiresAt;
+  const base = isoMs(job.heartbeatAt) || isoMs(job.startedAt) || isoMs(job.createdAt);
+  return base ? base + JOB_LEASE_MS : 0;
+}
+
 export class GenerationJob {
   constructor(private state: any, private env: Env) {}
+
+  private async markFailed(job: JobRecord, error: string, message: string) {
+    const failed: JobRecord = {
+      ...job,
+      status: 'failed',
+      stage: 'Failed',
+      message,
+      error,
+      finishedAt: new Date().toISOString(),
+      heartbeatAt: new Date().toISOString(),
+      leaseExpiresAt: undefined,
+      runToken: undefined,
+      expiresAt: Date.now() + JOB_TTL_MS,
+    };
+    await this.state.storage.put('job', failed);
+    await this.state.storage.setAlarm(Date.now() + JOB_TTL_MS);
+    return failed;
+  }
 
   async fetch(request: Request) {
     const url = new URL(request.url);
@@ -376,16 +415,37 @@ export class GenerationJob {
       if (!payload.jobId || !payload.input) return json(this.env, { ok: false, error: 'Invalid job payload' }, 400);
       const existing = await this.state.storage.get('job') as JobRecord | undefined;
       if (existing) return json(this.env, { ok: true, job: existing }, 200);
-      const job: JobRecord = { id: payload.jobId, status: 'queued', stage: 'Queued', progress: 0, message: 'Waiting for background runner', createdAt: new Date().toISOString() };
+      const now = Date.now();
+      const job: JobRecord = {
+        id: payload.jobId,
+        status: 'queued',
+        stage: 'Queued',
+        progress: 0,
+        message: 'Waiting for background runner',
+        createdAt: new Date(now).toISOString(),
+        attempt: 0,
+      };
       await this.state.storage.put('job', job);
       await this.state.storage.put('input', payload.input);
-      await this.state.storage.setAlarm(Date.now() + 50);
+      await this.state.storage.setAlarm(now + 50);
       return json(this.env, { ok: true, job }, 202);
     }
 
     if (request.method === 'GET' && url.pathname === '/status') {
-      const job = await this.state.storage.get('job') as JobRecord | undefined;
+      let job = await this.state.storage.get('job') as JobRecord | undefined;
       if (!job) return json(this.env, { ok: false, error: 'Job not found' }, 404);
+
+      const now = Date.now();
+      if (job.status === 'running') {
+        if (job.deadlineAt && now >= job.deadlineAt) {
+          job = await this.markFailed(job, 'Background reconstruction exceeded the 8 minute runtime limit.', 'The background run timed out instead of hanging indefinitely');
+        } else if (effectiveLeaseExpiry(job) <= now) {
+          // Self-heal zombie jobs, including jobs created by deployments before
+          // heartbeat fields existed. The alarm decides whether to retry or fail.
+          await this.state.storage.setAlarm(now + 25);
+        }
+      }
+
       const includeResult = url.searchParams.get('includeResult') === '1';
       const result = includeResult && job.status === 'succeeded' ? await readLargeResult(this.state.storage) : undefined;
       return json(this.env, { ok: true, job, ...(includeResult ? { result } : {}) });
@@ -394,37 +454,153 @@ export class GenerationJob {
   }
 
   async alarm() {
-    const job = await this.state.storage.get('job') as JobRecord | undefined;
+    let job = await this.state.storage.get('job') as JobRecord | undefined;
     if (!job) return;
-    if ((job.status === 'succeeded' || job.status === 'failed') && job.expiresAt && Date.now() >= job.expiresAt) {
+    const now = Date.now();
+
+    if ((job.status === 'succeeded' || job.status === 'failed') && job.expiresAt && now >= job.expiresAt) {
       await this.state.storage.deleteAll();
       return;
     }
+
+    if (job.status === 'running') {
+      if (job.deadlineAt && now >= job.deadlineAt) {
+        await this.markFailed(job, 'Background reconstruction exceeded the 8 minute runtime limit.', 'The background run timed out instead of hanging indefinitely');
+        return;
+      }
+
+      const leaseExpiry = effectiveLeaseExpiry(job);
+      if (leaseExpiry > now) {
+        await this.state.storage.setAlarm(leaseExpiry);
+        return;
+      }
+
+      const completedAttempts = job.attempt || 1;
+      if (completedAttempts >= MAX_JOB_ATTEMPTS) {
+        await this.markFailed(
+          job,
+          `Background runner heartbeat expired after ${completedAttempts} attempt(s).`,
+          'The worker stopped responding and automatic recovery was exhausted',
+        );
+        return;
+      }
+
+      job = {
+        ...job,
+        status: 'queued',
+        stage: 'Recovering stalled run',
+        message: 'Worker heartbeat expired. Restarting the reconstruction once.',
+        runToken: undefined,
+        leaseExpiresAt: undefined,
+      };
+      await this.state.storage.put('job', job);
+    }
+
     if (job.status !== 'queued') return;
     const input = await this.state.storage.get('input') as JobInput | undefined;
     if (!input) {
-      await this.state.storage.put('job', { ...job, status: 'failed', stage: 'Failed', error: 'Job input is missing', finishedAt: new Date().toISOString(), expiresAt: Date.now() + JOB_TTL_MS });
-      await this.state.storage.setAlarm(Date.now() + JOB_TTL_MS);
+      await this.markFailed(job, 'Job input is missing', 'The background job cannot be resumed');
       return;
     }
 
-    let current: JobRecord = { ...job, status: 'running', stage: 'Starting reconstruction', progress: 1, startedAt: new Date().toISOString() };
+    const startedNow = Date.now();
+    const attempt = (job.attempt || 0) + 1;
+    const runToken = crypto.randomUUID();
+    let current: JobRecord = {
+      ...job,
+      status: 'running',
+      stage: attempt > 1 ? 'Restarting reconstruction' : 'Starting reconstruction',
+      progress: Math.max(1, job.progress || 0),
+      message: attempt > 1 ? 'Recovering from an interrupted worker run' : 'Background runner started',
+      startedAt: job.startedAt || new Date(startedNow).toISOString(),
+      attempt,
+      runToken,
+      heartbeatAt: new Date(startedNow).toISOString(),
+      leaseExpiresAt: startedNow + JOB_LEASE_MS,
+      deadlineAt: job.deadlineAt || startedNow + JOB_HARD_TIMEOUT_MS,
+    };
     await this.state.storage.put('job', current);
-    const onProgress = async (update: ProgressUpdate) => {
-      current = { ...current, status: 'running', stage: update.stage, progress: Math.max(current.progress, Math.min(100, Math.round(update.progress))), message: update.message };
-      await this.state.storage.put('job', current);
+    await this.state.storage.setAlarm(startedNow + JOB_LEASE_MS);
+
+    let heartbeatWriting = false;
+    const heartbeat = async () => {
+      if (heartbeatWriting) return;
+      heartbeatWriting = true;
+      try {
+        const latest = await this.state.storage.get('job') as JobRecord | undefined;
+        if (!latest || latest.status !== 'running' || latest.runToken !== runToken) return;
+        const beat = Date.now();
+        current = {
+          ...latest,
+          heartbeatAt: new Date(beat).toISOString(),
+          leaseExpiresAt: beat + JOB_LEASE_MS,
+        };
+        await this.state.storage.put('job', current);
+        await this.state.storage.setAlarm(beat + JOB_LEASE_MS);
+      } finally {
+        heartbeatWriting = false;
+      }
     };
 
+    const heartbeatTimer = setInterval(() => { void heartbeat(); }, JOB_HEARTBEAT_MS);
+
+    const onProgress = async (update: ProgressUpdate) => {
+      const latest = await this.state.storage.get('job') as JobRecord | undefined;
+      if (!latest || latest.status !== 'running' || latest.runToken !== runToken) return;
+      const beat = Date.now();
+      current = {
+        ...latest,
+        stage: update.stage,
+        progress: Math.max(latest.progress || 0, Math.min(100, Math.round(update.progress))),
+        message: update.message,
+        heartbeatAt: new Date(beat).toISOString(),
+        leaseExpiresAt: beat + JOB_LEASE_MS,
+      };
+      await this.state.storage.put('job', current);
+      await this.state.storage.setAlarm(beat + JOB_LEASE_MS);
+    };
+
+    let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
     try {
-      const result = await analyze(input.target, this.env, input.qualityRequested, input.userInstructions, onProgress);
+      const deadline = current.deadlineAt || (Date.now() + JOB_HARD_TIMEOUT_MS);
+      const remaining = Math.max(1_000, deadline - Date.now());
+      const timeout = new Promise<never>((_, reject) => {
+        timeoutTimer = setTimeout(() => reject(new Error('Background reconstruction exceeded the 8 minute runtime limit.')), remaining);
+      });
+      const result = await Promise.race([
+        analyze(input.target, this.env, input.qualityRequested, input.userInstructions, onProgress),
+        timeout,
+      ]);
+
+      const latest = await this.state.storage.get('job') as JobRecord | undefined;
+      if (!latest || latest.status !== 'running' || latest.runToken !== runToken) return;
       await writeLargeResult(this.state.storage, result);
-      current = { ...current, status: 'succeeded', stage: 'Complete', progress: 100, message: 'Verified reconstruction ready', finishedAt: new Date().toISOString(), expiresAt: Date.now() + JOB_TTL_MS };
-      await this.state.storage.put('job', current);
-    } catch (error) {
-      current = { ...current, status: 'failed', stage: 'Failed acceptance gate', message: 'The reconstruction did not meet the recovery acceptance gates', error: error instanceof Error ? error.message : 'Background reconstruction failed', finishedAt: new Date().toISOString(), expiresAt: Date.now() + JOB_TTL_MS };
-      await this.state.storage.put('job', current);
-    } finally {
+      const done: JobRecord = {
+        ...latest,
+        status: 'succeeded',
+        stage: 'Complete',
+        progress: 100,
+        message: 'Verified reconstruction ready',
+        heartbeatAt: new Date().toISOString(),
+        leaseExpiresAt: undefined,
+        runToken: undefined,
+        finishedAt: new Date().toISOString(),
+        expiresAt: Date.now() + JOB_TTL_MS,
+      };
+      await this.state.storage.put('job', done);
       await this.state.storage.setAlarm(Date.now() + JOB_TTL_MS);
+    } catch (error) {
+      const latest = await this.state.storage.get('job') as JobRecord | undefined;
+      if (latest && latest.status === 'running' && latest.runToken === runToken) {
+        await this.markFailed(
+          latest,
+          error instanceof Error ? error.message : 'Background reconstruction failed',
+          'The reconstruction stopped with an explicit error instead of hanging',
+        );
+      }
+    } finally {
+      clearInterval(heartbeatTimer);
+      if (timeoutTimer) clearTimeout(timeoutTimer);
     }
   }
 }
@@ -448,8 +624,12 @@ export default {
         browser: 'cloudflare-browser-run',
         pipeline: 'structural reconstruction v2 recovery',
         architecture: 'Structural IR v2 + native Muse Image + durable jobs',
-        jobRunner: 'durable-object-alarm',
+        jobRunner: 'durable-object-alarm+heartbeat-lease',
         jobTtlHours: 24,
+        jobHeartbeatSeconds: JOB_HEARTBEAT_MS / 1000,
+        jobLeaseSeconds: JOB_LEASE_MS / 1000,
+        jobHardTimeoutMinutes: JOB_HARD_TIMEOUT_MS / 60_000,
+        maxJobAttempts: MAX_JOB_ATTEMPTS,
         designContract: 'structural-ir-v2+semantic-tokens',
         reconstructionRegistryPolicy: 'advisory-only',
         acceptanceGates: ['native-muse-image', 'media-injection', 'desktop-geometry', 'mobile-geometry', 'page-height', 'screenshot-sanity'],
