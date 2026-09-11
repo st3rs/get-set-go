@@ -4,6 +4,11 @@ export type GeneratedGeometry = {
   page: { width: number; height: number };
   viewport: { width: number; height: number };
   nodes: Array<{ id: string; box: Box }>;
+  media: {
+    visibleImages: number;
+    generatedDataImages: number;
+    substantialImages: number;
+  };
 };
 
 function clamp(value: number, min = 0, max = 2) {
@@ -11,27 +16,46 @@ function clamp(value: number, min = 0, max = 2) {
 }
 
 export async function extractGeneratedGeometry(page: any): Promise<GeneratedGeometry> {
-  return page.evaluate(() => ({
-    page: {
-      width: document.documentElement.scrollWidth,
-      height: document.documentElement.scrollHeight,
-    },
-    viewport: { width: innerWidth, height: innerHeight },
-    nodes: Array.from(document.querySelectorAll<HTMLElement>('[data-ref-id]'))
+  return page.evaluate(() => {
+    const images = Array.from(document.querySelectorAll<HTMLImageElement>('img'))
       .map((el) => {
         const r = el.getBoundingClientRect();
+        const s = getComputedStyle(el);
         return {
-          id: el.getAttribute('data-ref-id') || '',
-          box: {
-            x: Math.round(r.x),
-            y: Math.round(r.y + scrollY),
-            width: Math.round(r.width),
-            height: Math.round(r.height),
-          },
+          src: el.currentSrc || el.src || '',
+          visible: r.width > 0 && r.height > 0 && s.display !== 'none' && s.visibility !== 'hidden' && Number(s.opacity || 1) > 0,
+          width: r.width,
+          height: r.height,
         };
-      })
-      .filter((item) => item.id && item.box.width > 0 && item.box.height > 0),
-  }));
+      });
+    const visibleImages = images.filter((image) => image.visible);
+    return {
+      page: {
+        width: document.documentElement.scrollWidth,
+        height: document.documentElement.scrollHeight,
+      },
+      viewport: { width: innerWidth, height: innerHeight },
+      nodes: Array.from(document.querySelectorAll<HTMLElement>('[data-ref-id]'))
+        .map((el) => {
+          const r = el.getBoundingClientRect();
+          return {
+            id: el.getAttribute('data-ref-id') || '',
+            box: {
+              x: Math.round(r.x),
+              y: Math.round(r.y + scrollY),
+              width: Math.round(r.width),
+              height: Math.round(r.height),
+            },
+          };
+        })
+        .filter((item) => item.id && item.box.width > 0 && item.box.height > 0),
+      media: {
+        visibleImages: visibleImages.length,
+        generatedDataImages: visibleImages.filter((image) => /^data:image\/(webp|png|jpeg);base64,/i.test(image.src)).length,
+        substantialImages: visibleImages.filter((image) => image.width >= 96 && image.height >= 64).length,
+      },
+    };
+  });
 }
 
 export async function screenshotLumaSimilarity(page: any, referenceDataUrl: string, generatedDataUrl: string) {
@@ -135,8 +159,15 @@ export function compareGeometry(designIR: any, viewportName: 'desktop' | 'mobile
     pageHeightError: Number(pageHeightError.toFixed(3)),
     referencePageHeight,
     generatedPageHeight: generated.page.height,
+    generatedMedia: generated.media,
     thresholds,
   };
+}
+
+function requiredMediaForSite(designIR: any) {
+  if (designIR?.siteType === 'marketplace') return 4;
+  if (designIR?.siteType === 'commerce') return 3;
+  return 0;
 }
 
 export function objectiveGate(designIR: any, desktop: GeneratedGeometry, mobile: GeneratedGeometry, similarity?: { desktop: number; mobile: number }) {
@@ -146,8 +177,14 @@ export function objectiveGate(designIR: any, desktop: GeneratedGeometry, mobile:
   const screenshotPassed = similarity
     ? similarity.desktop >= screenshotThresholds.desktop && similarity.mobile >= screenshotThresholds.mobile
     : true;
+  const requiredMedia = requiredMediaForSite(designIR);
+  const mediaPassed = requiredMedia === 0 || (
+    desktop.media.generatedDataImages >= requiredMedia
+    && desktop.media.substantialImages >= requiredMedia
+  );
+
   return {
-    passed: desktopMetrics.passed && mobileMetrics.passed && screenshotPassed,
+    passed: desktopMetrics.passed && mobileMetrics.passed && screenshotPassed && mediaPassed,
     desktop: desktopMetrics,
     mobile: mobileMetrics,
     screenshot: similarity ? {
@@ -155,5 +192,12 @@ export function objectiveGate(designIR: any, desktop: GeneratedGeometry, mobile:
       thresholds: screenshotThresholds,
       passed: screenshotPassed,
     } : null,
+    media: {
+      required: requiredMedia,
+      generatedVisibleDesktop: desktop.media.generatedDataImages,
+      substantialVisibleDesktop: desktop.media.substantialImages,
+      generatedVisibleMobile: mobile.media.generatedDataImages,
+      passed: mediaPassed,
+    },
   };
 }
