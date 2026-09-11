@@ -21,7 +21,7 @@ await mkdir(rootDir, { recursive: true });
 function classifyHttp(status) {
   if (status === 400) return {
     classification: 'invalid-request-or-surface-contract',
-    nextAction: 'Inspect the raw response and request payload. This is a request/API-contract problem, not entitlement proof.',
+    nextAction: 'Inspect the raw response and request payload. Fix the direct request/API contract and retry. Do not classify this as entitlement.',
   };
   if (status === 401) return {
     classification: 'invalid-or-unaccepted-api-key',
@@ -60,14 +60,18 @@ function extractOutputText(payload) {
   return parts.join('\n').trim();
 }
 
-function findImageBase64(payload) {
+function findImageResult(payload) {
   for (const item of payload?.output || []) {
-    if (item?.type === 'image_generation_call' && typeof item.result === 'string') return item.result;
+    if (item?.type === 'image_generation_call' && typeof item.result === 'string') {
+      return { found: true, base64: item.result };
+    }
     for (const content of item?.content || []) {
-      if (content?.type === 'image_generation_call' && typeof content.result === 'string') return content.result;
+      if (content?.type === 'image_generation_call' && typeof content.result === 'string') {
+        return { found: true, base64: content.result };
+      }
     }
   }
-  return null;
+  return { found: false, base64: '' };
 }
 
 function detectImage(buffer) {
@@ -208,8 +212,8 @@ async function directCall({ name, model, input, kind }) {
     return proof;
   }
 
-  const base64 = findImageBase64(payload);
-  if (!base64) {
+  const imageResult = findImageResult(payload);
+  if (!imageResult.found) {
     const proof = {
       ok: false,
       name,
@@ -218,18 +222,40 @@ async function directCall({ name, model, input, kind }) {
       apiUrl: API_URL,
       stage: 'image-output',
       httpStatus: response.status,
-      classification: 'http-2xx-without-image-generation-result',
+      classification: 'http-2xx-without-image-result',
       rawResponseBytes: Buffer.byteLength(rawText),
+      imageByteLength: 0,
       outputTypes: Array.isArray(payload.output) ? payload.output.map((item) => item?.type || 'unknown') : [],
       elapsedMs: Date.now() - startedAt,
-      error: 'HTTP 2xx received, but no image_generation_call.result was found.',
+      error: 'HTTP 2xx received, but no image_generation_call.result was found. Inspect raw-response.json before changing the parser.',
       cloudflareInvolved: false,
     };
     await writeJson(join(outDir, 'proof.json'), proof);
     return proof;
   }
 
-  const imageBytes = Buffer.from(base64, 'base64');
+  const imageBytes = Buffer.from(imageResult.base64, 'base64');
+  if (imageBytes.length === 0) {
+    const proof = {
+      ok: false,
+      name,
+      kind,
+      model,
+      apiUrl: API_URL,
+      stage: 'image-output',
+      httpStatus: response.status,
+      classification: 'http-2xx-zero-image-bytes',
+      rawResponseBytes: Buffer.byteLength(rawText),
+      imageByteLength: 0,
+      outputTypes: Array.isArray(payload.output) ? payload.output.map((item) => item?.type || 'unknown') : [],
+      elapsedMs: Date.now() - startedAt,
+      error: 'HTTP 2xx contained an image result field, but it decoded to zero bytes. Inspect raw-response.json first for incomplete status, safety refusal, or a different response shape.',
+      cloudflareInvolved: false,
+    };
+    await writeJson(join(outDir, 'proof.json'), proof);
+    return proof;
+  }
+
   const detected = detectImage(imageBytes);
   const magicHex = imageBytes.subarray(0, 16).toString('hex').match(/.{1,2}/g)?.join(' ') || '';
 
@@ -282,6 +308,20 @@ function decide(spark, image) {
     return {
       classification: 'spark-and-image-direct-meta-pass',
       nextAction: 'Proceed to local Browser → Spark → Image → output.html slice. Cloudflare remains out of the proof path.',
+    };
+  }
+
+  if (spark.ok && image.httpStatus === 400) {
+    return {
+      classification: 'spark-works-image-request-contract-failed',
+      nextAction: 'Inspect image/raw-response.json, fix only the Muse Image direct request/surface contract, and retry. Do not classify this as entitlement and do not move providers yet.',
+    };
+  }
+
+  if (spark.ok && (image.classification === 'http-2xx-without-image-result' || image.classification === 'http-2xx-zero-image-bytes')) {
+    return {
+      classification: 'spark-works-image-2xx-without-usable-bytes',
+      nextAction: 'Read image/raw-response.json in full first. Check for incomplete status, safety refusal, or a different response path before changing parser code.',
     };
   }
 
@@ -353,6 +393,7 @@ const summary = {
     model: IMAGE_MODEL,
     httpStatus: image.httpStatus ?? null,
     classification: image.classification || image.proof || null,
+    imageByteLength: image.imageByteLength ?? null,
     proofFile: 'image/proof.json',
   },
   ...decision,
