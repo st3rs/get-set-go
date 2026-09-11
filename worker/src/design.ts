@@ -230,6 +230,140 @@ function crossViewportMatches(desktop: Signal, tablet: Signal, mobile: Signal) {
   });
 }
 
+function compactNode(node: ElementSignal) {
+  return {
+    id: node.id,
+    parentId: node.parentId,
+    childIds: node.childIds.slice(0, 12),
+    siblingIndex: node.siblingIndex,
+    depth: node.depth,
+    tag: node.tag,
+    role: node.role,
+    text: node.directText || node.text.slice(0, 100),
+    box: node.box,
+    style: {
+      display: node.style.display,
+      position: node.style.position,
+      fontSize: node.style.fontSize,
+      fontWeight: node.style.fontWeight,
+      lineHeight: node.style.lineHeight,
+      color: node.style.color,
+      backgroundColor: node.style.backgroundColor,
+      border: node.style.border,
+      borderRadius: node.style.borderRadius,
+      padding: node.style.padding,
+      margin: node.style.margin,
+      gap: node.style.gap,
+      flexDirection: node.style.flexDirection,
+      flexWrap: node.style.flexWrap,
+      gridTemplateColumns: node.style.gridTemplateColumns,
+      justifyContent: node.style.justifyContent,
+      alignItems: node.style.alignItems,
+      objectFit: node.style.objectFit,
+      aspectRatio: node.style.aspectRatio,
+    },
+    mediaKind: node.meta.mediaKind,
+  };
+}
+
+function balancedNodes(signal: Signal, limit: number) {
+  const nodes = signal.elements || [];
+  if (nodes.length <= limit) return nodes.map(compactNode);
+  const pageHeight = Math.max(1, signal.page.height);
+  const chosen = new Map<string, ElementSignal>();
+  const add = (node?: ElementSignal) => {
+    if (node && !chosen.has(node.id) && chosen.size < limit) chosen.set(node.id, node);
+  };
+
+  const important = nodes.filter((node) => {
+    const interactive = /^(button|a|input|select|textarea|nav|header|footer|main|section|aside|article)$/.test(node.tag);
+    const media = Boolean(node.meta.mediaKind);
+    const major = node.box.width >= signal.viewport.width * 0.35 && node.box.height >= 56;
+    return interactive || media || major;
+  });
+  for (const node of important.slice(0, Math.floor(limit * 0.42))) add(node);
+
+  const bands = 8;
+  const perBand = Math.max(2, Math.floor((limit - chosen.size) / bands));
+  for (let band = 0; band < bands && chosen.size < limit; band++) {
+    const y0 = (pageHeight * band) / bands;
+    const y1 = (pageHeight * (band + 1)) / bands;
+    const inBand = nodes.filter((node) => {
+      const cy = node.box.y + node.box.height / 2;
+      return cy >= y0 && cy < y1;
+    });
+    for (const node of inBand.slice(0, perBand)) add(node);
+  }
+
+  for (const node of nodes) {
+    if (chosen.size >= limit) break;
+    add(node);
+  }
+
+  // Restore selected ancestors so a compact node still has useful containment context.
+  const byId = new Map(nodes.map((node) => [node.id, node]));
+  for (const node of [...chosen.values()]) {
+    let parentId = node.parentId;
+    let guard = 0;
+    while (parentId && guard < 5 && chosen.size < limit) {
+      const parent = byId.get(parentId);
+      if (!parent) break;
+      add(parent);
+      parentId = parent.parentId;
+      guard++;
+    }
+  }
+
+  return [...chosen.values()]
+    .sort((a, b) => a.box.y - b.box.y || a.depth - b.depth || a.siblingIndex - b.siblingIndex)
+    .map(compactNode);
+}
+
+function compactSections(signal: Signal, limit = 28) {
+  const sections = measuredSections(signal);
+  if (sections.length <= limit) return sections;
+  const out: any[] = [];
+  for (let i = 0; i < limit; i++) {
+    const index = Math.round((i * (sections.length - 1)) / Math.max(1, limit - 1));
+    out.push(sections[index]);
+  }
+  return out;
+}
+
+function buildCodegenBundle(desktop: Signal, tablet: Signal, mobile: Signal, repeats: any[], matches: any[]) {
+  const desktopNodes = balancedNodes(desktop, 54);
+  const tabletNodes = balancedNodes(tablet, 36);
+  const mobileNodes = balancedNodes(mobile, 46);
+  const selectedIds = new Set([...desktopNodes, ...tabletNodes, ...mobileNodes].map((node: any) => node.id));
+  return {
+    version: '2.0-balanced',
+    strategy: 'balanced-vertical-and-semantic-sampling',
+    desktop: {
+      viewport: desktop.viewport,
+      page: desktop.page,
+      rootIds: desktop.structuralRootIds || [],
+      sections: compactSections(desktop, 28),
+      nodes: desktopNodes,
+    },
+    tablet: {
+      viewport: tablet.viewport,
+      page: tablet.page,
+      rootIds: tablet.structuralRootIds || [],
+      sections: compactSections(tablet, 22),
+      nodes: tabletNodes,
+    },
+    mobile: {
+      viewport: mobile.viewport,
+      page: mobile.page,
+      rootIds: mobile.structuralRootIds || [],
+      sections: compactSections(mobile, 26),
+      nodes: mobileNodes,
+    },
+    repeatedGroups: repeats.slice(0, 16),
+    crossViewportMatches: matches.filter((match: any) => selectedIds.has(match.id)).slice(0, 90),
+  };
+}
+
 export function buildDesignIR(breakpoints: Record<string, Signal>) {
   const desktop = breakpoints.desktop;
   const tablet = breakpoints.tablet;
@@ -240,8 +374,10 @@ export function buildDesignIR(breakpoints: Record<string, Signal>) {
   const widest = contentBoxes.reduce((max, r) => Math.max(max, r.box.width), 0);
   const maxContentWidth = widest > 0 ? widest : desktop.page.width;
   const matches = crossViewportMatches(desktop, tablet, mobile);
+  const repeats = repeatedGroups(desktop);
   const tabletMatched = matches.filter((match) => match.tablet).length;
   const mobileMatched = matches.filter((match) => match.mobile).length;
+  const codegenBundle = buildCodegenBundle(desktop, tablet, mobile, repeats, matches);
 
   return {
     version: '2.0.0',
@@ -280,11 +416,18 @@ export function buildDesignIR(breakpoints: Record<string, Signal>) {
     regions,
     bands: buildBands(desktop),
     structuralSnapshot: {
-      desktop: { rootIds: desktop.structuralRootIds || [], nodes: structuralScene(desktop, 620), sections: measuredSections(desktop) },
+      desktop: {
+        // Placed first intentionally: compactJson in the LLM path sees a balanced
+        // desktop/tablet/mobile evidence pack before verbose acceptance data.
+        codegenBundle,
+        rootIds: desktop.structuralRootIds || [],
+        nodes: structuralScene(desktop, 620),
+        sections: measuredSections(desktop),
+      },
       tablet: { rootIds: tablet.structuralRootIds || [], nodes: structuralScene(tablet, 520), sections: measuredSections(tablet) },
       mobile: { rootIds: mobile.structuralRootIds || [], nodes: structuralScene(mobile, 560), sections: measuredSections(mobile) },
     },
-    repeatedGroups: repeatedGroups(desktop),
+    repeatedGroups: repeats,
     crossViewportMatches: matches,
     responsive: {
       desktop: { viewport: desktop.viewport, page: desktop.page, visibleElements: desktop.visibleElementCount },
@@ -309,6 +452,7 @@ export function buildComponentPlan(ir: any, signal: Signal) {
     frameworkTarget: 'React + CSS',
     siteType: ir.siteType,
     structuralRoots: ir.structuralSnapshot?.desktop?.rootIds || signal.structuralRootIds || [],
+    codegenBundle: ir.structuralSnapshot?.desktop?.codegenBundle || null,
     sections: ir.structuralSnapshot?.desktop?.sections || [],
     repeatedGroups: ir.repeatedGroups || [],
     responsiveEvidence: {
