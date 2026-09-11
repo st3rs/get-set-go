@@ -1,5 +1,26 @@
 import './generation-progress.css'
 
+const MAX_WAIT_MS = 6 * 60 * 1000
+const nativeFetch = window.fetch.bind(window)
+
+window.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+  const target = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url
+  const isReconstruction = target.includes('/api/analyze')
+  if (!isReconstruction || init?.signal) return nativeFetch(input, init)
+
+  const controller = new AbortController()
+  const timeout = window.setTimeout(() => controller.abort(), MAX_WAIT_MS)
+
+  return nativeFetch(input, { ...init, signal: controller.signal })
+    .catch((error) => {
+      if (controller.signal.aborted) {
+        throw new Error('Reconstruction exceeded 6 minutes. The generation service may be stalled; please retry the run.')
+      }
+      throw error
+    })
+    .finally(() => window.clearTimeout(timeout))
+}) as typeof window.fetch
+
 const stages = [
   [0, 'Reading the reference'],
   [12, 'Measuring responsive layout'],
