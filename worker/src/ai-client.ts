@@ -83,8 +83,6 @@ export async function responsesRequest(env: AiEnv, role: AiRole, body: any, retr
       model: selected.model,
     };
 
-    // Keep the request portable across OpenAI-compatible providers. Meta and
-    // OpenRouter support the Responses API but do not need OpenAI verbosity.
     if (selected.provider !== 'openai' && payload.text?.verbosity) {
       payload.text = { ...payload.text };
       delete payload.text.verbosity;
@@ -116,11 +114,25 @@ export async function responsesRequest(env: AiEnv, role: AiRole, body: any, retr
   throw new Error(lastError);
 }
 
+/**
+ * Dedicated Muse Image model path.
+ *
+ * Muse Image is itself the image-generating model. It is NOT Muse Spark with an
+ * image_generation tool attached. Meta's Muse Image cookbook calls the same
+ * Responses endpoint with model=muse-image-1.0 and an input prompt directly.
+ * Keep this function separate from responsesRequest so text/code model tooling
+ * can never leak into image requests.
+ */
 export async function museImageRequest(env: AiEnv, body: any, retries = 2) {
   if (!env.MODEL_API_KEY) throw new Error('MODEL_API_KEY is required for Muse Image');
 
   const model = env.MUSE_IMAGE_MODEL || 'muse-image-1.0';
   let lastError = `meta ${model} request failed`;
+
+  // Explicitly discard text-model tool configuration. Muse Image uses a native
+  // Responses turn: { model: 'muse-image-1.0', input: ... }.
+  const { tools: _tools, text: _text, reasoning: _reasoning, ...nativeBody } = body || {};
+  if (nativeBody.input == null) throw new Error('Muse Image request requires input');
 
   for (let attempt = 0; attempt <= retries; attempt++) {
     const response = await fetch('https://api.meta.ai/v1/responses', {
@@ -129,7 +141,7 @@ export async function museImageRequest(env: AiEnv, body: any, retries = 2) {
         authorization: `Bearer ${env.MODEL_API_KEY}`,
         'content-type': 'application/json',
       },
-      body: JSON.stringify({ ...body, model }),
+      body: JSON.stringify({ ...nativeBody, model }),
     });
 
     if (response.ok) {
