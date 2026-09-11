@@ -16,6 +16,7 @@ import {
 type ImageEvidence = { label: string; dataUrl: string; detail?: 'low' | 'high' | 'auto' };
 type UserInstructions = { main: string; steps: string[] };
 type GeneratedAsset = { id: string; role: string; size: string; model: string; dataUrl: string };
+type AssetRequest = { id: string; role: string; size: '1024x1024' | '1024x1536' | '1536x1024'; prompt: string; required: boolean; source: 'reference' | 'resolver' };
 
 const CODEGEN_SCHEMA = {
   type: 'object',
@@ -47,13 +48,113 @@ function replaceAssetMarkers(text: string, assets: Array<{ id: string; dataUrl: 
   return result;
 }
 
-function maxAssetsForSite(designIR: any) {
-  return designIR?.siteType === 'commerce' ? 6 : 2;
-}
-
 function isDigitalMarketplace(input: { target: string; semanticEvidence: any }) {
   const haystack = `${input.target} ${JSON.stringify(input.semanticEvidence || {})}`.toLowerCase();
-  return /codecanyon|themeforest|envato|plugin|template|wordpress|script|source code|software marketplace|digital product|saas|mobile app|web app/.test(haystack);
+  return /codecanyon|themeforest|envato|plugin|template|wordpress|script|source code|software marketplace|digital product|saas marketplace|mobile app marketplace|web app marketplace/.test(haystack);
+}
+
+function maxAssetsForSite(input: { target: string; designIR: any; semanticEvidence: any }) {
+  if (isDigitalMarketplace(input)) return 6;
+  if (input.designIR?.siteType === 'commerce') return 6;
+  return 3;
+}
+
+function imageSizeForBox(box: any): AssetRequest['size'] {
+  const width = Math.max(1, Number(box?.width || 1));
+  const height = Math.max(1, Number(box?.height || 1));
+  const ratio = width / height;
+  if (ratio >= 1.22) return '1536x1024';
+  if (ratio <= 0.82) return '1024x1536';
+  return '1024x1024';
+}
+
+function referenceBackedAssetRequests(input: { target: string; designIR: any; semanticEvidence: any }): AssetRequest[] {
+  const desktop = input.semanticEvidence?.desktop?.elements || [];
+  const digitalMarketplace = isDigitalMarketplace(input);
+  const media = desktop
+    .filter((el: any) => {
+      const kind = String(el?.meta?.mediaKind || '');
+      const tag = String(el?.tag || '').toLowerCase();
+      const width = Number(el?.box?.width || 0);
+      const height = Number(el?.box?.height || 0);
+      const isMedia = Boolean(kind) || /^(img|picture|video|canvas|svg)$/.test(tag);
+      return isMedia && width >= 96 && height >= 64;
+    })
+    .map((el: any) => ({ ...el, area: Number(el.box.width || 0) * Number(el.box.height || 0) }))
+    .sort((a: any, b: any) => b.area - a.area);
+
+  const max = maxAssetsForSite(input);
+  const selected: any[] = [];
+  for (const el of media) {
+    const ratio = Number(el.box.width || 1) / Math.max(1, Number(el.box.height || 1));
+    const duplicate = selected.some((prev) => {
+      const prevRatio = Number(prev.box.width || 1) / Math.max(1, Number(prev.box.height || 1));
+      const closeRatio = Math.abs(prevRatio - ratio) < 0.08;
+      const closeSize = Math.abs(Number(prev.box.width || 0) - Number(el.box.width || 0)) < 40
+        && Math.abs(Number(prev.box.height || 0) - Number(el.box.height || 0)) < 40;
+      return closeRatio && closeSize;
+    });
+    if (!duplicate || digitalMarketplace) selected.push(el);
+    if (selected.length >= max) break;
+  }
+
+  // Marketplace references depend on rich card thumbnails. If DOM evidence under-samples
+  // those images, force a minimum set instead of letting the resolver silently choose zero.
+  const minimum = digitalMarketplace ? Math.min(4, max) : input.designIR?.siteType === 'commerce' ? Math.min(3, max) : 0;
+  while (selected.length < minimum) {
+    selected.push({
+      box: { width: 640, height: 360, x: 0, y: 0 },
+      text: '',
+      meta: { mediaKind: 'inferred-product-thumbnail' },
+    });
+  }
+
+  return selected.slice(0, max).map((el, index) => {
+    const width = Number(el?.box?.width || 640);
+    const height = Number(el?.box?.height || 360);
+    const ratio = Number((width / Math.max(1, height)).toFixed(2));
+    const role = digitalMarketplace ? `digital-product-thumbnail-${index + 1}` : `reference-media-${index + 1}`;
+    const prompt = digitalMarketplace
+      ? `Create an original polished digital-product marketplace thumbnail that occupies a ${width}x${height} reference footprint (aspect ratio about ${ratio}:1). It should look like a credible software, plugin, template, developer-tool, SaaS, mobile-app or web-app product preview, using layered UI panels, browser/device framing, interface composition or technical visual art as appropriate. Match the reference page's visual density and crop. No copied screenshots, logos, trademarks, prices, labels, watermarks or legible product names.`
+      : `Create an original replacement visual for a prominent reference media slot measuring about ${width}x${height} (aspect ratio about ${ratio}:1). Match the reference page's visual weight, crop, density and general palette while remaining original. No logos, trademarks, watermarks or copied proprietary media.`;
+    return {
+      id: `reference-media-${index + 1}`,
+      role,
+      size: imageSizeForBox(el.box),
+      prompt,
+      required: true,
+      source: 'reference' as const,
+    };
+  });
+}
+
+function mergeAssetRequests(
+  input: { target: string; designIR: any; semanticEvidence: any },
+  designPlan: DesignPlan,
+): AssetRequest[] {
+  const max = maxAssetsForSite(input);
+  const forced = referenceBackedAssetRequests(input);
+  const resolver = designPlan.assetRequests
+    .filter((asset) => asset.required)
+    .map((asset, index) => ({
+      id: safeAssetId(asset.id, index + forced.length),
+      role: asset.role,
+      size: asset.size,
+      prompt: asset.prompt,
+      required: true,
+      source: 'resolver' as const,
+    }));
+
+  const merged: AssetRequest[] = [];
+  const seen = new Set<string>();
+  for (const request of [...forced, ...resolver]) {
+    const key = request.id;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    merged.push(request);
+    if (merged.length >= max) break;
+  }
+  return merged;
 }
 
 function instructionText(instructions?: UserInstructions) {
@@ -101,7 +202,7 @@ async function resolveDesignPlan(
   const digitalMarketplace = isDigitalMarketplace(input);
   const content: any[] = [{
     type: 'input_text',
-    text: `You are the Phase B Design Token Resolver and Component Spec Planner for a high-fidelity website reconstruction engine.\n\nYou are NOT the code generator. Your only output is the strict DesignPlan JSON contract supplied by the response schema.\n\nMODE:\n- This request is reconstruction mode because a visual reference URL is supplied. Set mode=reconstruction.\n- Explicit user instructions have highest priority for aspects they intentionally change.\n- For all other aspects, measured browser geometry and screenshots are the visual truth.\n\n${instructions}\n\nTARGET: ${input.target}\n\nMEASURED DESIGN IR:\n${compactJson(input.designIR, 26000)}\n\nEXISTING STRUCTURAL HINTS:\n${compactJson(input.componentPlan, 10000)}\n\nSEMANTIC + GEOMETRY EVIDENCE:\n${compactJson(input.semanticEvidence, 18000)}\n\nTOKEN RESOLUTION CONTRACT:\n- Resolve one semantic token system before defining components.\n- Normalize colors by role: background, surface, elevated surface, text, muted text, border, accent, accent foreground, danger.\n- Derive typography scale, line-height pairings and weights from measured evidence.\n- Resolve a compact spacing rhythm and reusable geometry/elevation/motion tokens.\n- In reconstruction mode, measured values may become token values even if they do not fit an 8pt creation-mode scale. Do not flatten a distinctive reference into generic SaaS defaults.\n\nSTRUCTURAL COMPONENT CONTRACT:\n- Return a flat component graph. rootIds define top-level page order. components reference child component ids.\n- Prefer strict primitives for behavior-heavy basics and parametric components for heroes, cards, grids, sidebars, tables, headers and footers.\n- Request tierPreference=escape only when visible evidence or an explicit instruction truly requires geometry/behavior outside the registry. Every escape request needs a concrete escapeReason.\n- Preserve high-character references. Brutalist, editorial, high-density fintech, marketplace and other non-SaaS languages must not be normalized into a generic dashboard.\n\nPRODUCT MEDIA:\n- Good product media is mandatory when prominent product cards depend on imagery.\n- This target is ${digitalMarketplace ? 'likely a DIGITAL PRODUCT MARKETPLACE; prefer polished fictional software/template/plugin/app preview thumbnails' : 'not specifically classified as a digital marketplace from current evidence'}.\n- Never request copied proprietary screenshots, logos or trademarks. Neutral original mock media is allowed.\n- UI labels, prices, badges and copy stay in HTML.\n\nBuild a DesignPlan that a deterministic registry router and separate code generator can execute without inventing the design system again.`,
+    text: `You are the Phase B Design Token Resolver and Component Spec Planner for a high-fidelity website reconstruction engine.\n\nYou are NOT the code generator. Your only output is the strict DesignPlan JSON contract supplied by the response schema.\n\nMODE:\n- This request is reconstruction mode because a visual reference URL is supplied. Set mode=reconstruction.\n- Explicit user instructions have highest priority for aspects they intentionally change.\n- For all other aspects, measured browser geometry and screenshots are the visual truth.\n\n${instructions}\n\nTARGET: ${input.target}\n\nMEASURED DESIGN IR:\n${compactJson(input.designIR, 26000)}\n\nEXISTING STRUCTURAL HINTS:\n${compactJson(input.componentPlan, 10000)}\n\nSEMANTIC + GEOMETRY EVIDENCE:\n${compactJson(input.semanticEvidence, 18000)}\n\nTOKEN RESOLUTION CONTRACT:\n- Resolve one semantic token system before defining components.\n- Normalize colors by role and derive typography, spacing, geometry, elevation and motion from measured evidence.\n- In reconstruction mode, measured values may become token values even when they do not fit a creation-mode scale.\n\nSTRUCTURAL COMPONENT CONTRACT:\n- Return a flat component graph. rootIds define top-level page order. components reference child component ids.\n- Preserve high-character references. Do not normalize editorial, brutalist, dense fintech, marketplace or other distinctive languages into generic SaaS.\n\nPRODUCT MEDIA:\n- Product media is mandatory when prominent cards depend on imagery.\n- This target is ${digitalMarketplace ? 'a DIGITAL PRODUCT MARKETPLACE; use polished fictional software/template/plugin/app preview thumbnails' : 'not specifically classified as a digital marketplace from current evidence'}.\n- The runtime also derives mandatory media requests directly from browser evidence, so assetRequests here are supplemental rather than the sole trigger.\n- Never request copied proprietary screenshots, logos or trademarks. UI labels, prices, badges and copy stay in HTML.\n\nBuild a DesignPlan that a deterministic router and code generator can execute without inventing the design system again.`,
   }];
 
   for (const image of input.images) {
@@ -126,22 +227,20 @@ async function resolveDesignPlan(
   };
 }
 
-async function generateAssets(
-  env: AiEnv,
-  designPlan: DesignPlan,
-  input: { target: string; designIR: any; semanticEvidence: any },
-  provider: string,
-) {
+async function generateAssets(env: AiEnv, requests: AssetRequest[], digitalMarketplace: boolean) {
   const generatedAssets: GeneratedAsset[] = [];
   const assetErrors: string[] = [];
-  if (provider !== 'meta' || !env.MODEL_API_KEY) return { generatedAssets, assetErrors };
-
-  const digitalMarketplace = isDigitalMarketplace(input);
-  const requests = designPlan.assetRequests.filter((asset) => asset.required).slice(0, maxAssetsForSite(input.designIR));
+  if (!env.MODEL_API_KEY) {
+    return {
+      generatedAssets,
+      assetErrors: requests.length ? ['Muse Image unavailable: MODEL_API_KEY is not configured'] : [],
+      attempted: 0,
+    };
+  }
 
   const results = await mapLimit(requests, 3, async (asset, index) => {
     const id = safeAssetId(asset.id, index);
-    const isProduct = /product|catalog|card|merch|item|thumbnail|listing/i.test(`${asset.role} ${id}`);
+    const isProduct = digitalMarketplace || /product|catalog|card|merch|item|thumbnail|listing/i.test(`${asset.role} ${id}`);
     try {
       const imageResponse = await museImageRequest(env, {
         input: isProduct && digitalMarketplace
@@ -163,7 +262,7 @@ async function generateAssets(
     if (result.asset) generatedAssets.push(result.asset);
     if (result.error) assetErrors.push(result.error);
   }
-  return { generatedAssets, assetErrors };
+  return { generatedAssets, assetErrors, attempted: requests.length };
 }
 
 export async function runQualityPipeline(
@@ -182,17 +281,16 @@ export async function runQualityPipeline(
   const designPlan: DesignPlan = resolved.plan;
   const registryPlan = resolved.registryPlan;
   const cssVariables = resolved.cssVariables;
-  const requestedAssets = designPlan.assetRequests
-    .filter((asset) => asset.required)
-    .slice(0, maxAssetsForSite(input.designIR))
-    .map((asset, index) => ({ id: safeAssetId(asset.id, index), role: asset.role, size: asset.size, prompt: asset.prompt }));
+  const digitalMarketplace = isDigitalMarketplace(input);
+  const requestedAssets = mergeAssetRequests(input, designPlan);
 
-  // Asset generation and code generation run concurrently after the shared DesignPlan is resolved.
-  const assetPromise = generateAssets(env, designPlan, input, resolved.response.provider);
+  // Image generation is no longer controlled solely by the LLM resolver. Reference-backed
+  // media requests are deterministic and image generation can run even if text fallback changes.
+  const assetPromise = generateAssets(env, requestedAssets, digitalMarketplace);
 
   const codegenContent: any[] = [{
     type: 'input_text',
-    text: `You are the target React code generator for a guardrailed design engine. The design decisions have ALREADY been made. Do not invent a second design system.\n\n${instructions}\n\nTARGET: ${input.target}\n\nDESIGN PLAN (single source of truth):\n${compactJson(designPlan, 36000)}\n\nDETERMINISTIC COMPONENT REGISTRY ROUTING:\n${compactJson(registryPlan, 26000)}\n\nSEMANTIC CSS VARIABLES:\n${cssVariableBlock(cssVariables)}\n\nGENERATED ASSET MANIFEST:\n${compactJson(requestedAssets, 12000)}\n\nCODEGEN RULES:\n- Return production-quality React TSX and CSS plus a completely self-contained previewHtml with inline CSS and no external scripts.\n- Component hierarchy, order, responsive behavior, states and styling intent must follow DesignPlan.\n- Use the registry component name from the routing plan as the local React component contract.\n- STRICT tier preserves semantic/accessibility behavior and does not introduce arbitrary styling.\n- PARAMETRIC tier styling comes from semantic CSS variables and plan parameters.\n- ESCAPE tier may use scoped custom layout values only for components routed to escape; colors and typography still use semantic variables.\n- Declare resolved semantic values once in :root. Outside :root, avoid raw hex/rgb/hsl colors.\n- Do not normalize distinctive editorial, brutalist, dense fintech or marketplace geometry into generic rounded SaaS cards.\n- Explicit user instructions remain intentional overrides. Preserve reference fidelity elsewhere.\n- Do not add gradients, glass effects, giant radii or decorative motion unless requested or supported by evidence.\n- For every item in GENERATED ASSET MANIFEST, use its exact {{ASSET:id}} marker where that image belongs. Asset generation happens in parallel with this codegen pass.\n- Product card copy, prices, badges and CTA remain HTML.\n- previewHtml must be standalone, script-free and visually representative of App.tsx + styles.css.`,
+    text: `You are the target React code generator for a guardrailed design engine. The design decisions have ALREADY been made.\n\n${instructions}\n\nTARGET: ${input.target}\n\nDESIGN PLAN:\n${compactJson(designPlan, 36000)}\n\nCOMPONENT ROUTING:\n${compactJson(registryPlan, 26000)}\n\nSEMANTIC CSS VARIABLES:\n${cssVariableBlock(cssVariables)}\n\nMANDATORY GENERATED ASSET MANIFEST:\n${compactJson(requestedAssets, 16000)}\n\nCODEGEN RULES:\n- Return production-quality React TSX and CSS plus a self-contained previewHtml.\n- For EVERY item in MANDATORY GENERATED ASSET MANIFEST, place its exact {{ASSET:id}} marker into a prominent media slot with the requested aspect ratio. Do not omit the marker.\n- Product card copy, prices, badges and CTA remain HTML.\n- Preserve reference geometry and distinctive visual character.\n- Explicit user instructions remain intentional overrides.\n- previewHtml must be standalone and script-free.`,
   }];
 
   for (const image of input.images) {
@@ -207,6 +305,12 @@ export async function runQualityPipeline(
   });
 
   const [assetResult, codegenResponse] = await Promise.all([assetPromise, codegenPromise]);
+
+  const mediaRequired = digitalMarketplace || input.designIR?.siteType === 'commerce';
+  if (mediaRequired && requestedAssets.length > 0 && assetResult.generatedAssets.length === 0) {
+    throw new Error(`Required Muse Image generation produced 0/${requestedAssets.length} assets. ${assetResult.assetErrors.slice(0, 3).join(' | ') || 'No image result was returned.'}`);
+  }
+
   const codegenText = extractResponseText(codegenResponse.payload);
   if (!codegenText) throw new Error('Code generation returned no output');
   const generated = JSON.parse(codegenText);
@@ -218,7 +322,6 @@ export async function runQualityPipeline(
     generated.previewHtml = replaceAssetMarkers(generated.previewHtml, replacements);
   }
 
-  // Never leave a failed asset marker as an invalid URL in the result.
   const failedIds = requestedAssets.filter((requested) => !assetResult.generatedAssets.some((asset) => asset.id === requested.id));
   for (const failed of failedIds) {
     const marker = `{{ASSET:${failed.id}}}`;
@@ -234,9 +337,13 @@ export async function runQualityPipeline(
     models: {
       resolver: resolved.response.model,
       codegen: codegenResponse.model,
-      image: assetResult.generatedAssets[0]?.model || null,
+      image: assetResult.generatedAssets[0]?.model || (requestedAssets.length && env.MODEL_API_KEY ? env.MUSE_IMAGE_MODEL || 'muse-image-1.0' : null),
     },
-    aiCalls: 2 + assetResult.generatedAssets.length,
+    aiCalls: 2 + assetResult.attempted,
+    imageAssetAttempts: assetResult.attempted,
+    imageAssetRequested: requestedAssets.length,
+    imageAssetSucceeded: assetResult.generatedAssets.length,
+    imageAssetPlan: requestedAssets.map(({ prompt: _prompt, ...asset }) => asset),
     visualSpec: designPlan,
     designTokens: designPlan.tokens,
     componentSpec: { rootIds: designPlan.rootIds, components: designPlan.components },
