@@ -10,6 +10,11 @@ interface Env extends AiEnv {
   FRONTEND_ORIGIN?: string;
 }
 
+type UserInstructions = {
+  main: string;
+  steps: string[];
+};
+
 const VIEWPORTS = {
   desktop: { width: 1440, height: 900 },
   tablet: { width: 768, height: 1024 },
@@ -18,6 +23,7 @@ const VIEWPORTS = {
 
 const MAX_CRITIC_PASSES = 3;
 const QUALITY_THRESHOLD = 92;
+const MAX_INSTRUCTION_STEPS = 8;
 
 function cors(env: Env) {
   return {
@@ -52,6 +58,27 @@ function normalizeTarget(input: unknown) {
   url.username = '';
   url.password = '';
   return url.toString();
+}
+
+function normalizeInstructions(mainRaw: unknown, stepsRaw: unknown): UserInstructions {
+  const main = typeof mainRaw === 'string' ? mainRaw.trim().slice(0, 6000) : '';
+  const steps = Array.isArray(stepsRaw)
+    ? stepsRaw
+        .slice(0, MAX_INSTRUCTION_STEPS)
+        .filter((step): step is string => typeof step === 'string')
+        .map((step) => step.trim().slice(0, 4000))
+        .filter(Boolean)
+    : [];
+
+  let remaining = 16000 - main.length;
+  const boundedSteps: string[] = [];
+  for (const step of steps) {
+    if (remaining <= 0) break;
+    const bounded = step.slice(0, remaining);
+    if (bounded) boundedSteps.push(bounded);
+    remaining -= bounded.length;
+  }
+  return { main, steps: boundedSteps };
 }
 
 function bytesToBase64(bytes: Uint8Array) {
@@ -124,11 +151,11 @@ function semanticSlice(signal: Signal, elementLimit: number, landmarkLimit: numb
   };
 }
 
-async function analyze(target: string, env: Env, qualityRequested: boolean) {
+async function analyze(target: string, env: Env, qualityRequested: boolean, userInstructions: UserInstructions) {
   const browser = await launch(env.BROWSER);
   try {
     const context = await browser.newContext({
-      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/142 Safari/537.36 GetSetGo/0.8',
+      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/142 Safari/537.36 GetSetGo/0.9',
     });
     const page = await context.newPage();
     const breakpoints: Record<string, Signal> = {};
@@ -166,6 +193,7 @@ async function analyze(target: string, env: Env, qualityRequested: boolean) {
             mobile: semanticSlice(breakpoints.mobile, 160, 80),
           },
           images,
+          userInstructions,
         });
 
         const originalDesktop = images.find((x) => x.label === 'desktop top viewport')?.dataUrl;
@@ -185,6 +213,7 @@ async function analyze(target: string, env: Env, qualityRequested: boolean) {
                 generatedDesktop: rendered.desktop,
                 originalMobile,
                 generatedMobile: originalMobile ? rendered.mobile : undefined,
+                userInstructions,
               });
 
               quality.aiCalls = (quality.aiCalls || 0) + 1;
@@ -215,7 +244,7 @@ async function analyze(target: string, env: Env, qualityRequested: boolean) {
     const criticPassed = Boolean(critic && critic.verdict === 'pass' && Number(critic.score) >= QUALITY_THRESHOLD);
     const generatedPreview = quality?.generated?.previewHtml
       ? {
-          version: '0.8.0',
+          version: '0.9.0',
           mode: criticPassed ? 'ai-verified-preview' : critic ? 'ai-iterated-preview' : 'ai-quality-preview',
           html: quality.generated.previewHtml,
           sandboxRecommended: true,
@@ -225,9 +254,10 @@ async function analyze(target: string, env: Env, qualityRequested: boolean) {
       : deterministicPreview;
 
     const selected = configured ? selectAi(env, 'architect') : null;
+    const instructionCount = (userInstructions.main ? 1 : 0) + userInstructions.steps.length;
 
     return {
-      version: '0.8.0',
+      version: '0.9.0',
       target,
       generatedAt: new Date().toISOString(),
       policy: {
@@ -243,6 +273,8 @@ async function analyze(target: string, env: Env, qualityRequested: boolean) {
         qualityThreshold: QUALITY_THRESHOLD,
         criticPasses: criticHistory.length,
         qualityGate: criticPassed ? 'pass' : critic ? 'needs-improvement' : quality ? 'critic-unavailable' : 'not-run',
+        instructionCount,
+        instructionSteps: userInstructions.steps.length,
         rawDomReturned: false,
         screenshotEmbeddedInResponse: false,
       },
@@ -287,22 +319,24 @@ export default {
         ok: true,
         service: 'get-set-go-api',
         browser: 'cloudflare-browser-run',
-        pipeline: 'rich scene evidence + Muse product media + iterative visual critic v0.8',
+        pipeline: 'prompt-aware reconstruction + rich scene evidence + iterative critic v0.9',
         aiConfigured: configured,
         provider: selected?.provider || null,
         model: selected?.model || null,
         imageModel: env.MODEL_API_KEY ? (env.MUSE_IMAGE_MODEL || 'muse-image-1.0') : null,
         qualityThreshold: QUALITY_THRESHOLD,
         maxCriticPasses: MAX_CRITIC_PASSES,
+        maxInstructionSteps: MAX_INSTRUCTION_STEPS,
       });
     }
 
     if (reqUrl.pathname === '/analyze' && request.method === 'POST') {
       try {
-        const body = await request.json() as { url?: unknown; quality?: unknown };
+        const body = await request.json() as { url?: unknown; quality?: unknown; prompt?: unknown; steps?: unknown };
         const target = normalizeTarget(body.url);
         const qualityRequested = body.quality !== false;
-        return json(env, await analyze(target, env, qualityRequested));
+        const userInstructions = normalizeInstructions(body.prompt, body.steps);
+        return json(env, await analyze(target, env, qualityRequested, userInstructions));
       } catch (error) {
         const message = error instanceof Error ? error.message : 'Analysis failed';
         return json(env, { ok: false, error: message }, 400);
@@ -312,7 +346,7 @@ export default {
     return json(env, {
       ok: true,
       service: 'get-set-go-api',
-      endpoints: { health: 'GET /health', analyze: 'POST /analyze { url, quality? }' },
+      endpoints: { health: 'GET /health', analyze: 'POST /analyze { url, quality?, prompt?, steps? }' },
     });
   },
 } satisfies ExportedHandler<Env>;
