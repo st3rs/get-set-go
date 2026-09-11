@@ -1,6 +1,6 @@
 type Box = { x: number; y: number; width: number; height: number };
 
-type GeneratedGeometry = {
+export type GeneratedGeometry = {
   page: { width: number; height: number };
   viewport: { width: number; height: number };
   nodes: Array<{ id: string; box: Box }>;
@@ -32,6 +32,41 @@ export async function extractGeneratedGeometry(page: any): Promise<GeneratedGeom
       })
       .filter((item) => item.id && item.box.width > 0 && item.box.height > 0),
   }));
+}
+
+export async function screenshotLumaSimilarity(page: any, referenceDataUrl: string, generatedDataUrl: string) {
+  return page.evaluate(async ({ referenceDataUrl, generatedDataUrl }: { referenceDataUrl: string; generatedDataUrl: string }) => {
+    const load = (src: string) => new Promise<HTMLImageElement>((resolve, reject) => {
+      const image = new Image();
+      image.onload = () => resolve(image);
+      image.onerror = () => reject(new Error('Could not decode screenshot for comparison'));
+      image.src = src;
+    });
+    const [reference, generated] = await Promise.all([load(referenceDataUrl), load(generatedDataUrl)]);
+    const width = 128;
+    const height = 80;
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    if (!ctx) throw new Error('Canvas 2D context unavailable');
+
+    ctx.drawImage(reference, 0, 0, width, height);
+    const a = ctx.getImageData(0, 0, width, height).data;
+    ctx.clearRect(0, 0, width, height);
+    ctx.drawImage(generated, 0, 0, width, height);
+    const b = ctx.getImageData(0, 0, width, height).data;
+
+    let diff = 0;
+    let count = 0;
+    for (let i = 0; i < a.length; i += 4) {
+      const la = 0.2126 * a[i] + 0.7152 * a[i + 1] + 0.0722 * a[i + 2];
+      const lb = 0.2126 * b[i] + 0.7152 * b[i + 1] + 0.0722 * b[i + 2];
+      diff += Math.abs(la - lb) / 255;
+      count++;
+    }
+    return Number((1 - diff / Math.max(1, count)).toFixed(3));
+  }, { referenceDataUrl, generatedDataUrl });
 }
 
 function referenceTargets(designIR: any, viewportName: 'desktop' | 'mobile') {
@@ -104,12 +139,21 @@ export function compareGeometry(designIR: any, viewportName: 'desktop' | 'mobile
   };
 }
 
-export function objectiveGate(designIR: any, desktop: GeneratedGeometry, mobile: GeneratedGeometry) {
+export function objectiveGate(designIR: any, desktop: GeneratedGeometry, mobile: GeneratedGeometry, similarity?: { desktop: number; mobile: number }) {
   const desktopMetrics = compareGeometry(designIR, 'desktop', desktop);
   const mobileMetrics = compareGeometry(designIR, 'mobile', mobile);
+  const screenshotThresholds = { desktop: 0.45, mobile: 0.42 };
+  const screenshotPassed = similarity
+    ? similarity.desktop >= screenshotThresholds.desktop && similarity.mobile >= screenshotThresholds.mobile
+    : true;
   return {
-    passed: desktopMetrics.passed && mobileMetrics.passed,
+    passed: desktopMetrics.passed && mobileMetrics.passed && screenshotPassed,
     desktop: desktopMetrics,
     mobile: mobileMetrics,
+    screenshot: similarity ? {
+      ...similarity,
+      thresholds: screenshotThresholds,
+      passed: screenshotPassed,
+    } : null,
   };
 }
