@@ -57,7 +57,7 @@ Do not merge 403 and 404.
 
 | HTTP | Classification | Meaning / next action |
 | --- | --- | --- |
-| 400 | `invalid-request-or-surface-contract` | Request shape or API contract problem. Inspect raw response before changing anything else. |
+| 400 | `invalid-request-or-surface-contract` | Request shape or API contract problem. Inspect raw response, fix the request, and retry. Do not classify this as entitlement. |
 | 401 | `invalid-or-unaccepted-api-key` | Raw key is rejected. Fix the key, not Get Set Go. |
 | 403 | `forbidden-auth-entitlement-policy-or-geo` | Could be auth, model entitlement, policy, or geographic restriction. Interpret against the Spark control result. |
 | 404 | `model-not-served-on-this-meta-api-surface` | Treat as a serving-surface problem. Move the image call to a provider that explicitly serves Muse Image rather than requesting entitlement or repeatedly changing payload shape. |
@@ -67,11 +67,18 @@ Do not merge 403 and 404.
 ## Interpretation matrix
 
 - Spark PASS + Image PASS: Meta direct two-model path is proven. Proceed to the local full slice.
-- Spark PASS + Image 404: Keep Spark on Meta; move only Muse Image to a provider that explicitly serves it.
+- Spark PASS + Image 400: Muse Image request/surface contract is wrong. Inspect `image/raw-response.json`, fix only that request, and retry. Do not classify it as entitlement and do not switch providers yet.
 - Spark PASS + Image 403: Base key/Spark surface works; image-specific entitlement or policy is the leading explanation. Do not debug Cloudflare.
+- Spark PASS + Image 404: Keep Spark on Meta; move only Muse Image to a provider that explicitly serves it.
+- Spark PASS + Image HTTP 2xx but `imageByteLength = 0`, no image result, or unusable image bytes: inspect the complete `image/raw-response.json` first. Check response status/completion, safety refusal, and actual JSON shape before changing parser code.
 - Spark 403: investigate key/account/region access first; image entitlement is not isolated by that run.
 - Spark 401: raw key problem.
 - Spark 400: control request/API contract problem.
+
+## Time box locked before runtime proof
+
+- If Image returns **403 or 404 while Spark passes**, move only `museImageRequest()` to fal or another explicitly supported Muse Image provider within the same day. Do not spend that day requesting access or cycling through speculative payload variants.
+- Every remaining UNPROVEN row gets one required artifact and one explicit time box. If the artifact cannot be produced inside that time box, treat the underlying assumption as suspect instead of adding reliability layers around it.
 
 ## Rule
 
