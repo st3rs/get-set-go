@@ -16,6 +16,12 @@ export type AiSelection = {
   model: string;
 };
 
+export type MuseImageResult = {
+  base64: string;
+  mimeType: 'image/webp' | 'image/png' | 'image/jpeg' | 'application/octet-stream';
+  byteLengthEstimate: number;
+};
+
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -116,12 +122,8 @@ export async function responsesRequest(env: AiEnv, role: AiRole, body: any, retr
 
 /**
  * Dedicated Muse Image model path.
- *
- * Muse Image is itself the image-generating model. It is NOT Muse Spark with an
- * image_generation tool attached. Meta's Muse Image cookbook calls the same
- * Responses endpoint with model=muse-image-1.0 and an input prompt directly.
- * Keep this function separate from responsesRequest so text/code model tooling
- * can never leak into image requests.
+ * Muse Image is itself the image-generating model. It must never inherit tools,
+ * response schemas, reasoning settings, or text-model options from Muse Spark.
  */
 export async function museImageRequest(env: AiEnv, body: any, retries = 2) {
   if (!env.MODEL_API_KEY) throw new Error('MODEL_API_KEY is required for Muse Image');
@@ -129,8 +131,6 @@ export async function museImageRequest(env: AiEnv, body: any, retries = 2) {
   const model = env.MUSE_IMAGE_MODEL || 'muse-image-1.0';
   let lastError = `meta ${model} request failed`;
 
-  // Explicitly discard text-model tool configuration. Muse Image uses a native
-  // Responses turn: { model: 'muse-image-1.0', input: ... }.
   const { tools: _tools, text: _text, reasoning: _reasoning, ...nativeBody } = body || {};
   if (nativeBody.input == null) throw new Error('Muse Image request requires input');
 
@@ -170,12 +170,42 @@ export function extractResponseText(payload: any) {
   return parts.join('\n').trim();
 }
 
-export function extractMuseImageBase64(payload: any) {
-  for (const item of payload?.output || []) {
-    if (item?.type === 'image_generation_call' && typeof item.result === 'string') return item.result;
-    for (const content of item?.content || []) {
-      if (content?.type === 'image_generation_call' && typeof content.result === 'string') return content.result;
-    }
+function detectImageMime(base64: string): MuseImageResult['mimeType'] {
+  try {
+    const prefix = atob(base64.slice(0, 32));
+    const bytes = Array.from(prefix, (char) => char.charCodeAt(0));
+    if (bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) return 'image/png';
+    if (bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return 'image/jpeg';
+    if (prefix.slice(0, 4) === 'RIFF' && prefix.slice(8, 12) === 'WEBP') return 'image/webp';
+  } catch {
+    return 'application/octet-stream';
   }
-  return null;
+  return 'application/octet-stream';
+}
+
+export function extractMuseImage(payload: any): MuseImageResult | null {
+  let base64: string | null = null;
+  for (const item of payload?.output || []) {
+    if (item?.type === 'image_generation_call' && typeof item.result === 'string') {
+      base64 = item.result;
+      break;
+    }
+    for (const content of item?.content || []) {
+      if (content?.type === 'image_generation_call' && typeof content.result === 'string') {
+        base64 = content.result;
+        break;
+      }
+    }
+    if (base64) break;
+  }
+  if (!base64) return null;
+  return {
+    base64,
+    mimeType: detectImageMime(base64),
+    byteLengthEstimate: Math.floor((base64.length * 3) / 4),
+  };
+}
+
+export function extractMuseImageBase64(payload: any) {
+  return extractMuseImage(payload)?.base64 || null;
 }
