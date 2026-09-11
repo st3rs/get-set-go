@@ -1,0 +1,5 @@
+html,body,#root,.page,input,textarea,button,select,option{font-family:'Montserrat',ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif!important}
+
+body,.page,p,li,input,textarea,select,option,.heroCopy,.sectionCopy,.featureCard p,.audienceGrid p,.proofGrid p,.faqList details p,.footer p,.footer>span,.composerTopline small,.promptMeta,.statusLine,.inputState,.demoStep p,.runMetrics span,.issueRow span{font-weight:500!important}
+
+h1,h2,h3,h4,h5,h6,.brand,.navCta,.kicker,.composerLabel,.optionalTag,.suggestionLabel,.suggestionChips button,.addStepButton,.reconstructButton,.themeToggle,.modeTabs span,.demoBar b,.demoAside>strong,.scoreChip,.metric strong,.proofGrid strong,.faqList summary,.finalCta button,.fakeHero button,.typeRow span,.runMetrics strong{font-weight:700!important}
