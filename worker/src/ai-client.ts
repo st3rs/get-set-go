@@ -22,8 +22,26 @@ export type MuseImageResult = {
   byteLengthEstimate: number;
 };
 
+const TEXT_REQUEST_TIMEOUT_MS = 150_000;
+const IMAGE_REQUEST_TIMEOUT_MS = 120_000;
+
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: number) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort('upstream-timeout'), timeoutMs);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } catch (error) {
+    if (controller.signal.aborted) {
+      throw new Error(`Upstream request timed out after ${Math.round(timeoutMs / 1000)}s`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 export function aiConfigured(env: AiEnv) {
@@ -58,7 +76,7 @@ export function selectAi(env: AiEnv, role: AiRole): AiSelection {
   throw new Error('No AI provider is configured. Add MODEL_API_KEY, OPENROUTER_API_KEY, or OPENAI_API_KEY.');
 }
 
-export async function responsesRequest(env: AiEnv, role: AiRole, body: any, retries = 2) {
+export async function responsesRequest(env: AiEnv, role: AiRole, body: any, retries = 1) {
   const selected = selectAi(env, role);
   const endpoint = selected.provider === 'meta'
     ? 'https://api.meta.ai/v1/responses'
@@ -94,11 +112,19 @@ export async function responsesRequest(env: AiEnv, role: AiRole, body: any, retr
       delete payload.text.verbosity;
     }
 
-    const response = await fetch(endpoint, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(payload),
-    });
+    let response: Response;
+    try {
+      response = await fetchWithTimeout(endpoint, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(payload),
+      }, TEXT_REQUEST_TIMEOUT_MS);
+    } catch (error) {
+      lastError = `${selected.provider} ${selected.model}: ${error instanceof Error ? error.message : 'upstream request failed'}`;
+      if (attempt === retries) break;
+      await sleep(1500 * Math.pow(2, attempt));
+      continue;
+    }
 
     if (response.ok) {
       return {
@@ -125,7 +151,7 @@ export async function responsesRequest(env: AiEnv, role: AiRole, body: any, retr
  * Muse Image is itself the image-generating model. It must never inherit tools,
  * response schemas, reasoning settings, or text-model options from Muse Spark.
  */
-export async function museImageRequest(env: AiEnv, body: any, retries = 2) {
+export async function museImageRequest(env: AiEnv, body: any, retries = 1) {
   if (!env.MODEL_API_KEY) throw new Error('MODEL_API_KEY is required for Muse Image');
 
   const model = env.MUSE_IMAGE_MODEL || 'muse-image-1.0';
@@ -135,14 +161,22 @@ export async function museImageRequest(env: AiEnv, body: any, retries = 2) {
   if (nativeBody.input == null) throw new Error('Muse Image request requires input');
 
   for (let attempt = 0; attempt <= retries; attempt++) {
-    const response = await fetch('https://api.meta.ai/v1/responses', {
-      method: 'POST',
-      headers: {
-        authorization: `Bearer ${env.MODEL_API_KEY}`,
-        'content-type': 'application/json',
-      },
-      body: JSON.stringify({ ...nativeBody, model }),
-    });
+    let response: Response;
+    try {
+      response = await fetchWithTimeout('https://api.meta.ai/v1/responses', {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${env.MODEL_API_KEY}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({ ...nativeBody, model }),
+      }, IMAGE_REQUEST_TIMEOUT_MS);
+    } catch (error) {
+      lastError = `meta ${model}: ${error instanceof Error ? error.message : 'upstream request failed'}`;
+      if (attempt === retries) break;
+      await sleep(1500 * Math.pow(2, attempt));
+      continue;
+    }
 
     if (response.ok) {
       return { payload: await response.json(), provider: 'meta' as const, model };
