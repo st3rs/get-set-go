@@ -20,12 +20,12 @@
       }
     ]
   },
-  "migrations": [
-    {
-      "tag": "v1-generation-jobs",
-      "new_sqlite_classes": ["GenerationJob"]
+  "exports": {
+    "GenerationJob": {
+      "type": "durable-object",
+      "storage": "sqlite"
     }
-  ],
+  },
   "vars": {
     "FRONTEND_ORIGIN": "https://get-set-go.pages.dev",
     "MUSE_SPARK_MODEL": "muse-spark-1.3",
