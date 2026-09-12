@@ -8,7 +8,8 @@
     "build": "vite build",
     "preview": "vite preview",
     "smoke:meta-image": "node scripts/smoke-meta-image.mjs",
-    "proof:meta-models": "node scripts/proof-meta-models.mjs"
+    "proof:meta-models": "node scripts/proof-meta-models.mjs",
+    "proof:browser-capture": "node scripts/proof-browser-capture.mjs"
   },
   "dependencies": {
     "react": "latest",
@@ -18,6 +19,7 @@
     "@types/react": "latest",
     "@types/react-dom": "latest",
     "@vitejs/plugin-react": "latest",
+    "playwright": "latest",
     "typescript": "latest",
     "vite": "latest"
   }
