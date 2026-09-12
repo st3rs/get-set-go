@@ -19,7 +19,7 @@
     "@types/react": "latest",
     "@types/react-dom": "latest",
     "@vitejs/plugin-react": "latest",
-    "playwright": "latest",
+    "puppeteer-core": "latest",
     "typescript": "latest",
     "vite": "latest"
   }
