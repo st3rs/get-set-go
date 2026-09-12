@@ -5,36 +5,62 @@ This document deliberately separates model functionality from deployment plumbin
 | Proof | What it proves | Required artifact | Current status |
 | --- | --- | --- | --- |
 | Meta Muse Image account/playground access | This Meta project/account can select `muse-image-1.0` and visibly generate the expected white-chair image in the Meta Model API playground | Captured playground screenshot with the generated image visibly rendered | PROVEN |
-| Direct Meta Spark control | The raw `MODEL_API_KEY` can call `muse-spark-1.3` without Cloudflare | `artifacts/meta-model-proof/<timestamp>/spark/proof.json` plus raw response | UNPROVEN |
-| Direct Meta Muse Image API-key path | The same raw key can call `muse-image-1.0` through Meta Model API, return recognized nonzero image bytes, and produce a visually openable image | `artifacts/meta-model-proof/<timestamp>/image/proof.json` plus real image file opened manually and visually confirmed | UNPROVEN |
-| Direct two-model interpretation | Spark and Image results can be interpreted without conflating request, key/project, policy, geo, or request-surface failures | `artifacts/meta-model-proof/<timestamp>/summary.json` | UNPROVEN |
-| Direct/local Browser capture | Browser capture works outside the production orchestration path | Saved screenshot plus capture metadata | UNPROVEN |
+| Direct Meta Spark control | The raw `MODEL_API_KEY` can call `muse-spark-1.3` without Cloudflare | `artifacts/meta-model-proof/<timestamp>/spark/proof.json` plus raw response | PROVEN |
+| Direct Meta Muse Image API-key bytes | The same raw key can call `muse-image-1.0` through Meta Model API and return recognized nonzero image bytes | `artifacts/meta-model-proof/<timestamp>/image/proof.json` | PROVEN |
+| Direct Meta Muse Image visual integrity | The saved API-generated image is not truncated/corrupt and visibly matches the white-chair smoke prompt | Saved `image.webp` opened manually and visually confirmed | VISUAL CHECK PENDING |
+| Direct two-model interpretation | Spark and Image results can be interpreted without conflating request, key/project, policy, geo, or request-surface failures | `artifacts/meta-model-proof/<timestamp>/summary.json` | PROVEN |
+| Direct/local Browser capture | Browser capture works outside the production orchestration path | Saved screenshot plus capture metadata | NEXT / UNPROVEN |
 | Direct/local Spark structure | `muse-spark-1.3` returns JSON that parses against the minimal contract | Saved raw Spark response plus parsed JSON | UNPROVEN |
 | Direct/local output injection | Generated image bytes are actually embedded in `output.html` | Saved `output.html` opened/rendered with the generated image visible | UNPROVEN |
 | Local end-to-end minimal slice | Browser → Spark → Muse Image → HTML completes without Cloudflare edge timing | Complete local artifact directory | UNPROVEN |
 | Cloudflare Muse Image plumbing | Worker deployment, secret binding, routing, and response parsing work | Production `/api/smoke-image` response with image bytes | UNPROVEN |
 | Production minimal slice | The already-proven local slice also survives production routing/time limits | Production response plus rendered output | UNPROVEN |
 
-## Evidence now established
+## Runtime proof recorded on 2026-09-12
 
-The Meta Model API playground visibly generated the white-chair image with `muse-image-1.0`. This proves account/project-level model access on Meta's own developer surface. It does not yet prove that the exported `MODEL_API_KEY` belongs to the same project/team or that the direct request contract is correct.
+The direct proof command completed against `https://api.meta.ai/v1/responses` with Cloudflare explicitly out of the path.
 
-Meta's official `meta-model-cookbook` also documents Muse Image as being driven through the Responses API, so a future 404 must be investigated as an endpoint/path/request-contract issue before concluding that the model is unavailable.
+Spark control:
+
+```text
+model: muse-spark-1.3
+HTTP: 200
+output: CONTROL_OK
+raw response: 924 bytes
+elapsed: 6433 ms
+```
+
+Muse Image:
+
+```text
+model: muse-image-1.0
+HTTP: 200
+content-type: application/json
+raw response: 69382 bytes
+image bytes: 50872 bytes
+mime: image/webp
+file: image.webp
+magic: 52 49 46 46 b0 c6 00 00 57 45 42 50 56 50 38 58
+elapsed: 16192 ms
+```
+
+Summary classification:
+
+```text
+spark-and-image-direct-meta-pass
+```
+
+This proves the exported `MODEL_API_KEY`, Meta Responses endpoint, `muse-spark-1.3`, and `muse-image-1.0` work together directly. No provider fallback is justified by access/entitlement concerns.
+
+The image row is intentionally split into bytes proof and visual-integrity proof. Magic bytes and nonzero length do not prove the file is fully renderable. The saved `image.webp` must still be opened once and visually confirmed before the visual-integrity row becomes PROVEN.
 
 ## Direct proof command
 
 The source of truth for the API-key rows is `scripts/proof-meta-models.mjs`.
 
-Run one command with `MODEL_API_KEY` already present in the local environment:
-
 ```bash
 npm run proof:meta-models
 ```
-
-The script makes two direct calls, in order:
-
-1. `muse-spark-1.3` with a tiny text control prompt.
-2. `muse-image-1.0` with `a simple product photo of a white chair`.
 
 No Cloudflare Worker, Pages Function, Durable Object, browser binding, registry, critic, queue, polling, service binding, or deployment participates in this proof.
 
@@ -54,7 +80,7 @@ artifacts/meta-model-proof/<timestamp>/
 
 ## HTTP interpretation
 
-- Spark PASS + Image PASS: direct Meta API-key path is proven only after the saved image is opened and visibly renders intact. Next step is **Direct/local Browser capture**, not Cloudflare.
+- Spark PASS + Image PASS: direct Meta API-key bytes path is proven. Open the saved image once to establish visual integrity. Next step is **Direct/local Browser capture**, not Cloudflare.
 - Spark PASS + Image 400: inspect the complete image raw response and copy the authenticated Meta Documentation/playground request contract exactly. This is not entitlement.
 - Spark PASS + Image 403: first verify that `MODEL_API_KEY` was created under the same Meta project/team as the playground proof. Do not switch providers and do not debug Cloudflare.
 - Spark PASS + Image 404: inspect the exact Meta endpoint/path and authenticated request shape. Official Meta material documents Muse Image through the Responses API, so do not infer lack of model availability from 404 alone.
@@ -65,7 +91,7 @@ artifacts/meta-model-proof/<timestamp>/
 
 ## Provider decision
 
-The previous automatic plan to move Muse Image to fal after a Meta 403/404 is cancelled. The playground artifact proves this project/account has Muse Image access on Meta's own surface. Keep the first-party Meta path until direct API evidence shows a specific blocker that cannot be corrected by using the matching project key or documented request contract.
+The previous automatic plan to move Muse Image to fal after a Meta 403/404 is cancelled. Direct runtime proof now shows the project key can call both Muse Spark and Muse Image successfully through Meta's Responses API.
 
 ## Latency controls
 
@@ -73,4 +99,4 @@ The authenticated playground exposes output format, reasoning strength, image se
 
 ## Rule
 
-Do not mark an API-key row PASS without the required runtime artifact. For Muse Image API-key proof, PASS additionally requires opening the saved image and visually confirming it renders intact and matches the smoke prompt. CI/build success only means the code compiles or bundles. After direct Meta proof, proceed to Local Browser capture before any Cloudflare plumbing test.
+Do not mark the visual-integrity row PROVEN until the saved API-generated image has been opened and visibly confirmed intact. After that, proceed directly to Local Browser capture before any Cloudflare plumbing test.
