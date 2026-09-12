@@ -19,8 +19,10 @@ jobs:
         with:
           node-version: 22
       - run: npm install --no-audit --no-fund
-      - name: Syntax-check direct Meta proof script
-        run: node --check scripts/proof-meta-models.mjs
+      - name: Syntax-check proof scripts
+        run: |
+          node --check scripts/proof-meta-models.mjs
+          node --check scripts/proof-browser-capture.mjs
       - run: npm run build
 
   worker:
