@@ -9,7 +9,8 @@ This document deliberately separates model functionality from deployment plumbin
 | Direct Meta Muse Image API-key bytes | The same raw key can call `muse-image-1.0` through Meta Model API and return recognized nonzero image bytes | `artifacts/meta-model-proof/<timestamp>/image/proof.json` | PROVEN |
 | Direct Meta Muse Image visual integrity | The saved API-generated image is not truncated/corrupt and visibly matches the white-chair smoke prompt | Saved `image.webp` opened manually and visually confirmed | VISUAL CHECK PENDING |
 | Direct two-model interpretation | Spark and Image results can be interpreted without conflating request, key/project, policy, geo, or request-surface failures | `artifacts/meta-model-proof/<timestamp>/summary.json` | PROVEN |
-| Direct/local Browser capture | Local Playwright can open a real public reference URL, settle at network idle, save the final DOM, and produce a visually valid full-page screenshot without Cloudflare browser infrastructure | `artifacts/browser-capture/<timestamp>/page.html`, `screenshot.png`, `proof.json`, plus manual visual confirmation | NEXT / UNPROVEN |
+| Direct/local Lightpanda capture | Local Lightpanda can open a public reference URL over CDP, settle at network idle, save the final DOM, report final URL/status/HTML bytes/<img> count, and emit a screenshot sanity artifact without Cloudflare browser infrastructure | `artifacts/browser-capture/<timestamp>/page.html`, `screenshot.png`, `proof.json`, plus manual sanity check | NEXT / UNPROVEN |
+| Pixel-accurate visual reference capture | A real layout/rendering engine produces the actual visual page used for reconstruction | Full-page screenshot from a layout-capable renderer, visually confirmed | UNPROVEN |
 | Direct/local Spark structure | `muse-spark-1.3` returns JSON that parses against the minimal contract | Saved raw Spark response plus parsed JSON | UNPROVEN |
 | Direct/local output injection | Generated image bytes are actually embedded in `output.html` | Saved `output.html` opened/rendered with the generated image visible | UNPROVEN |
 | Local end-to-end minimal slice | Browser → Spark → Muse Image → HTML completes without Cloudflare edge timing | Complete local artifact directory | UNPROVEN |
@@ -54,7 +55,7 @@ This proves the exported `MODEL_API_KEY`, Meta Responses endpoint, `muse-spark-1
 
 The image row is intentionally split into bytes proof and visual-integrity proof. Magic bytes and nonzero length do not prove the file is fully renderable. The saved `image.webp` must still be opened once and visually confirmed before the visual-integrity row becomes PROVEN.
 
-## Local Browser capture proof
+## Local Lightpanda capture proof
 
 Source of truth: `scripts/proof-browser-capture.mjs`.
 
@@ -64,28 +65,40 @@ Default reference URL:
 https://www.raycast.com/
 ```
 
-It is intentionally a public, visually rich SaaS landing page that can also serve as a real reconstruction reference later. The URL can be overridden with `BROWSER_CAPTURE_URL` without changing the script.
+The script connects to a local Lightpanda CDP server through `puppeteer-core`. Default endpoint:
 
-The script uses local Playwright Chromium only. It does not use the Cloudflare `BROWSER` binding, Workers, Pages Functions, service bindings, Durable Objects, or any browser stealth/user-agent spoofing.
+```text
+ws://127.0.0.1:9222
+```
 
-It waits for `networkidle`, then writes exactly the proof artifacts needed for this gate:
+It does not use Playwright, Cloudflare `BROWSER` binding, Workers, Pages Functions, service bindings, Durable Objects, stealth plugins, or user-agent spoofing.
+
+It waits for Puppeteer's `networkidle0`, then writes:
 
 ```text
 artifacts/browser-capture/<timestamp>/
 ├─ page.html       # page.content()
-├─ screenshot.png  # fullPage: true
-└─ proof.json      # target URL, final URL, HTTP status, HTML byte length, <img> count, timing
+├─ screenshot.png  # Lightpanda Page.captureScreenshot
+└─ proof.json      # target/final URL, HTTP status, HTML bytes, <img> count, screenshot bytes, timing
 ```
 
-Run:
+Run from Windows after Lightpanda is serving CDP in WSL2 or Docker:
 
 ```bash
 npm run proof:browser-capture
 ```
 
-Programmatic artifact creation is not enough to mark this row PROVEN. `screenshot.png` must be opened and visibly confirmed to show the intended target page. A cookie wall, bot/challenge page, login wall, or blank/near-blank page is a failed capture even when HTTP status, HTML byte length, or image count look healthy.
+### Important screenshot semantics
 
-Time box: **2 hours**. If the chosen site blocks automation or falls into bot detection, change `BROWSER_CAPTURE_URL` to another suitable public reference. Do not spend the time box tuning user agents, stealth plugins, fingerprinting, proxy tricks, or other anti-detection workarounds.
+Lightpanda's own source states that it has no layout engine. Its `Page.captureScreenshot` implementation is a text-only page rasterizer, not a CSS/layout-accurate browser screenshot. Therefore:
+
+- `screenshot.png` is valid as a sanity artifact for detecting a blank page, obvious error/challenge text, cookie/login walls, or the wrong document.
+- `screenshot.png` is **not** valid as the pixel-accurate visual reference for the reconstruction benchmark.
+- `proof.json` explicitly records `suitableAsPixelReference: false` so this limitation cannot accidentally be promoted to PASS later.
+
+This keeps the evidence honest: Lightpanda proves local navigation and DOM capture. A layout-capable renderer must still provide the reconstruction reference image before we claim visual reconstruction evidence.
+
+Time box: **2 hours**. If the chosen target blocks Lightpanda automation, change `BROWSER_CAPTURE_URL`. Do not spend the time box tuning user agents, stealth plugins, fingerprinting, proxy tricks, or other anti-detection workarounds.
 
 ## Direct Meta proof command
 
@@ -113,7 +126,7 @@ artifacts/meta-model-proof/<timestamp>/
 
 ## HTTP interpretation
 
-- Spark PASS + Image PASS: direct Meta API-key bytes path is proven. Open the saved image once to establish visual integrity. Next step is **Direct/local Browser capture**, not Cloudflare.
+- Spark PASS + Image PASS: direct Meta API-key bytes path is proven. Open the saved image once to establish visual integrity. Next step is **Direct/local Lightpanda capture**, not Cloudflare.
 - Spark PASS + Image 400: inspect the complete image raw response and copy the authenticated Meta Documentation/playground request contract exactly. This is not entitlement.
 - Spark PASS + Image 403: first verify that `MODEL_API_KEY` was created under the same Meta project/team as the playground proof. Do not switch providers and do not debug Cloudflare.
 - Spark PASS + Image 404: inspect the exact Meta endpoint/path and authenticated request shape. Official Meta material documents Muse Image through the Responses API, so do not infer lack of model availability from 404 alone.
@@ -132,4 +145,4 @@ The authenticated playground exposes output format, reasoning strength, image se
 
 ## Rule
 
-Do not mark the visual-integrity row PROVEN until the saved API-generated image has been opened and visibly confirmed intact. For Local Browser capture, do not mark PROVEN until `screenshot.png` is opened and visibly confirmed to show the intended reference page. After that, proceed to the local Spark structure proof before any Cloudflare plumbing test.
+Do not mark the Muse Image visual-integrity row PROVEN until the saved API-generated image has been opened and visibly confirmed intact. Do not treat a Lightpanda screenshot as a pixel-accurate reconstruction reference. After Lightpanda navigation/DOM capture is proven, obtain the required visual reference artifact before claiming the browser evidence needed for visual reconstruction.
