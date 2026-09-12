@@ -1,6 +1,13 @@
 import type { BrowserWorker } from '@cloudflare/playwright';
 import { handleMinimalRebuild, handleSmokeImage } from './minimal';
 
+// Compatibility export only. The existing Cloudflare Worker owns Durable Objects
+// implemented by GenerationJob, so Cloudflare refuses a new version that drops
+// this class without an explicit destructive migration. Re-export the proven
+// legacy implementation to preserve those objects while keeping the minimal
+// default request path completely independent of JOBS / Durable Objects.
+export { GenerationJob } from './index';
+
 interface Env {
   BROWSER: BrowserWorker;
   MODEL_API_KEY?: string;
@@ -42,7 +49,8 @@ export default {
         version: 'minimal-slice-v1',
         pipeline: 'single-request proof-first slice',
         backgroundJobs: false,
-        durableObjects: false,
+        durableObjectsInMinimalRequestPath: false,
+        legacyGenerationJobExportPreserved: true,
         critic: false,
         registry: false,
         geometryGate: false,
